@@ -1,0 +1,266 @@
+/* =========================
+   VARIABLES
+========================= */
+:root {
+    --primary: #0b1f3a;       /* bleu marine foncé */
+    --secondary: #1e3a5f;
+    --accent: #c8bfae;        /* beige */
+    --background: #f5f1ea;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --border: #e2dcd2;
+}
+
+/* =========================
+   GLOBAL
+========================= */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+body {
+    background-color: var(--background);
+    color: var(--text);
+}
+
+/* =========================
+   HEADER
+========================= */
+header {
+    background: var(--primary);
+    color: var(--accent);
+    padding: 15px 20px;
+}
+
+header h1 {
+    font-size: 22px;
+    margin-bottom: 10px;
+}
+
+nav ul {
+    display: flex;
+    gap: 10px;
+    list-style: none;
+}
+
+nav button {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: 0.2s;
+}
+
+nav button:hover {
+    background: var(--accent);
+    color: var(--primary);
+}
+
+/* =========================
+   MAIN LAYOUT
+========================= */
+main {
+    padding: 20px;
+}
+
+.tab {
+    display: none;
+}
+
+.tab.active {
+    display: block;
+}
+
+/* =========================
+   CARDS / SECTIONS
+========================= */
+section {
+    background: var(--card);
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+/* =========================
+   INPUTS & BUTTONS
+========================= */
+input, select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 8px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    outline: none;
+    background: #fff;
+}
+
+input:focus, select:focus {
+    border-color: var(--secondary);
+}
+
+button {
+    padding: 10px 14px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    background: var(--primary);
+    color: white;
+    transition: 0.2s;
+}
+
+button:hover {
+    background: var(--secondary);
+}
+
+/* =========================
+   TABLE
+========================= */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+}
+
+th, td {
+    border: 1px solid var(--border);
+    padding: 10px;
+    text-align: left;
+}
+
+th {
+    background: var(--primary);
+    color: var(--accent);
+}
+
+td {
+    background: #fff;
+}
+
+/* =========================
+   ARTICLES / LISTES
+========================= */
+#featuredArticles,
+#savedArticles,
+#validationQueue,
+#externalContent {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.article {
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #fff;
+}
+
+/* =========================
+   CHAT
+========================= */
+#chatResponse {
+    margin-top: 15px;
+    padding: 15px;
+    background: #fff;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+}
+
+/* =========================
+   FOOTER
+========================= */
+footer {
+    text-align: center;
+    padding: 15px;
+    color: var(--muted);
+}
+
+/* =========================
+   MODAL
+========================= */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal.hidden {
+    display: none;
+}
+
+.modal-content {
+    background: var(--card);
+    padding: 20px;
+    border-radius: 12px;
+    width: 80%;
+    max-width: 800px;
+    border: 1px solid var(--border);
+}
+
+/* =========================
+   TITRES
+========================= */
+h2 {
+    margin-bottom: 10px;
+    color: var(--primary);
+}
+
+h3 {
+    margin-top: 15px;
+    margin-bottom: 10px;
+    color: var(--secondary);
+}
+
+/* =========================
+   TABLEAU IA
+========================= */
+#aiTableSection {
+    padding: 20px;
+    margin: 20px;
+    background: var(--card);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+#addRowBtn {
+    margin-top: 10px;
+}
+
+/* =========================
+   EFFETS MODERNES
+========================= */
+section:hover {
+    transform: translateY(-2px);
+    transition: 0.2s;
+}
+
+/* =========================
+   SCROLLBAR (OPTIONNEL)
+========================= */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--secondary);
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--background);
+}
