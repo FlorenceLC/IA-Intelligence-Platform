@@ -2,15 +2,15 @@
 
 Une application intelligente de veille stratégique basée sur l’IA, permettant de :
 
-Résumer automatiquement des articles
+- Résumer automatiquement des articles
 
-Détecter les doublons
+- Détecter les doublons
 
-Classer et analyser l’information
+- Classer et analyser l’information
 
-Suivre les tendances IA
+- Suivre les tendances IA
 
-Générer des exports compatibles avec Confluence
+- Générer des exports compatibles avec Confluence
 
-Interroger une base de connaissance enrichie
+- Interroger une base de connaissance enrichie
 
