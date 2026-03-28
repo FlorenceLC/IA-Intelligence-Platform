@@ -14,3 +14,6 @@ Une application intelligente de veille stratégique basée sur l’IA, permettan
 
 - Interroger une base de connaissance enrichie
 
+--- 
+# 🚀 Accès rapide à l'application
+👉 Lancez l'application : 
