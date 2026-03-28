@@ -16,4 +16,4 @@ Une application intelligente de veille stratégique basée sur l’IA, permettan
 
 --- 
 # 🚀 Accès rapide à l'application
-👉 Lancez l'application : 
+👉 Lancez l'application : [IA Intelligence Platform](https://florencelc.github.io/IA-Intelligence-Platform/)
