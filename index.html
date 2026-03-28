@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IA Intelligence Platform</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <!-- HEADER -->
+    <header>
+        <h1>🧠 IA Intelligence Platform</h1>
+        <nav>
+            <ul>
+                <li><button onclick="showTab('dashboard')">Dashboard</button></li>
+                <li><button onclick="showTab('veille')">Veille</button></li>
+                <li><button onclick="showTab('external')">Veille externe</button></li>
+                <li><button onclick="showTab('analysis')">Analyse</button></li>
+                <li><button onclick="showTab('search')">Interroger</button></li>
+                <li><button onclick="showTab('settings')">Paramètres</button></li>
+            </ul>
+        </nav>
+    </header>
+
+    <!-- MAIN -->
+    <main>
+
+        <!-- DASHBOARD -->
+        <section id="dashboard" class="tab active">
+            <h2>📥 Ajouter un article</h2>
+
+            <input type="text" id="articleUrl" placeholder="Colle le lien de l'article">
+            <button id="addArticleBtn">Analyser</button>
+
+            <h3>📄 Résumé généré</h3>
+            <div id="summaryContainer"></div>
+
+            <button id="saveBtn">💾 Sauvegarder</button>
+            <button id="rejectBtn">❌ Rejeter</button>
+        </section>
+
+        <!-- VEILLE -->
+        <section id="veille" class="tab">
+            <h2>📰 Veille</h2>
+
+            <h3>⭐ Articles à la une</h3>
+            <div id="featuredArticles"></div>
+
+            <h3>📚 Articles sauvegardés</h3>
+            <div id="savedArticles"></div>
+
+            <h3>🧪 File de validation</h3>
+            <div id="validationQueue"></div>
+        </section>
+
+        <!-- VEILLE EXTERNE -->
+        <section id="external" class="tab">
+            <h2>🌍 Veille externe</h2>
+
+            <div id="externalContent">
+                <!-- Articles organisés ici -->
+            </div>
+        </section>
+
+        <!-- ANALYSE -->
+        <section id="analysis" class="tab">
+            <h2>📊 Analyse des tendances</h2>
+
+            <h3>🌍 Carte des acteurs IA</h3>
+            <div id="worldMap"></div>
+
+            <h3>☁️ Nuage de mots</h3>
+            <div id="wordCloud"></div>
+
+            <h3>📈 Tendances mensuelles</h3>
+            <div id="trends"></div>
+        </section>
+
+        <!-- INTERROGER LA VEILLE -->
+        <section id="search" class="tab">
+            <h2>💬 Interroger la veille</h2>
+
+            <input type="text" id="queryInput" placeholder="Pose ta question...">
+            <button id="askBtn">Demander</button>
+
+            <div id="chatResponse"></div>
+        </section>
+
+        <!-- PARAMÈTRES -->
+        <section id="settings" class="tab">
+            <h2>⚙️ Paramètres</h2>
+
+            <label>🔑 API Mistral :</label>
+            <input type="text" id="mistralApiKey">
+
+            <label>🔗 Inoreader API :</label>
+            <input type="text" id="inoreaderApiKey">
+
+            <label>⚖️ Seuil de détection de doublon (%)</label>
+            <input type="number" id="duplicateThreshold" value="85">
+
+            <label>🎯 Sensibilité</label>
+            <select id="sensitivity">
+                <option value="strict">Strict</option>
+                <option value="normal" selected>Normal</option>
+                <option value="permissive">Permissif</option>
+            </select>
+
+            <button id="saveSettingsBtn">💾 Sauvegarder</button>
+        </section>
+
+    </main>
+
+    <!-- TABLEAU CONCURRENCE IA -->
+    <section id="aiTableSection">
+        <h2>🪖 Concurrence IA</h2>
+
+        <table id="aiTable">
+            <thead>
+                <tr>
+                    <th>Statut</th>
+                    <th>Fabricant</th>
+                    <th>Produit</th>
+                    <th>Rôle de l’IA</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Lignes dynamiques -->
+            </tbody>
+        </table>
+
+        <button id="addRowBtn">➕ Ajouter une ligne</button>
+    </section>
+
+    <!-- MODALE DE VALIDATION DOUBLON -->
+    <div id="duplicateModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>⚠️ Doublon détecté</h2>
+
+            <div id="duplicateComparison">
+                <!-- Comparaison dynamique -->
+            </div>
+
+            <button id="mergeBtn">🔁 Fusionner</button>
+            <button id="validateNewBtn">✅ Nouveau</button>
+            <button id="rejectDuplicateBtn">❌ Rejeter</button>
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        <p>© 2026 IA Intelligence Platform</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
