@@ -2260,7 +2260,7 @@ async function testFeedUrl(id) {
 //   ALTER TABLE ia_platform ENABLE ROW LEVEL SECURITY;
 //   CREATE POLICY "anon read write" ON ia_platform FOR ALL USING (true) WITH CHECK (true);
 
-let sb = { url: '', key: '', userId: '' };
+let sb = { url: 'https://hxfolotdvcefmbvqceom.supabase.co', key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnaWZ0cHh0ZnFjd2Z4c2N6amZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxNTk0MTksImV4cCI6MjA5MDczNTQxOX0.THfYqRnhLBDe9YOJ5EUugGk-ihl7LHxJDEmjXO8Puz8', userId: 'sgiftpxtfqcwfxsczjfg' };
 
 function loadSupabaseConfig() {
   const cfg = localStorage.getItem('ia_sb_config');
