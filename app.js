@@ -11,7 +11,7 @@ let state = {
   settings: {
     mistralKey: '',
     inoreaderToken: '',
-    duplicateThreshold: 75,
+    duplicateThreshold: 82,
     sensitivity: 'normal',
     rssAutoFetch: true,
     lastAutoFetch: null
@@ -139,15 +139,47 @@ async function importArticle() {
     // Step 1: Fetch page content via allorigins proxy (CORS bypass)
     let pageText = '';
     let pageTitle = '';
+    let extractedPubDate = null; // extracted directly from HTML meta tags
+
     try {
       const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
       const resp = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
       if (resp.ok) {
         const data = await resp.json();
         const html = data.contents || '';
+
         // Extract title
         const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
         pageTitle = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
+
+        // ── Extract publication date directly from HTML meta tags ──
+        const dateCandidates = [
+          // JSON-LD
+          html.match(/"datePublished"\s*:\s*"([^"]+)"/i)?.[1],
+          html.match(/"date_published"\s*:\s*"([^"]+)"/i)?.[1],
+          // OG / meta tags
+          html.match(/property=["']article:published_time["'][^>]*content=["']([^"']+)["']/i)?.[1],
+          html.match(/content=["']([^"']+)["'][^>]*property=["']article:published_time["']/i)?.[1],
+          html.match(/name=["']pubdate["'][^>]*content=["']([^"']+)["']/i)?.[1],
+          html.match(/name=["']publish_date["'][^>]*content=["']([^"']+)["']/i)?.[1],
+          html.match(/name=["']date["'][^>]*content=["']([^"']+)["']/i)?.[1],
+          // <time> tags
+          html.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1],
+          // Microdata
+          html.match(/itemprop=["']datePublished["'][^>]*content=["']([^"']+)["']/i)?.[1],
+          html.match(/itemprop=["']datePublished["'][^>]*datetime=["']([^"']+)["']/i)?.[1],
+        ].filter(Boolean);
+
+        for (const candidate of dateCandidates) {
+          try {
+            const d = new Date(candidate);
+            if (!isNaN(d.getTime()) && d.getFullYear() > 2000 && d.getFullYear() <= new Date().getFullYear() + 1) {
+              extractedPubDate = d.toISOString();
+              break;
+            }
+          } catch(e) {}
+        }
+
         // Strip HTML tags and extract readable text
         pageText = html
           .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -164,25 +196,11 @@ async function importArticle() {
           .substring(0, 4000);
       }
     } catch(fetchErr) {
-      // If fetch fails, we still proceed — Mistral will work from URL + title
       console.warn('Fetch page failed:', fetchErr.message);
     }
 
-    // Step 2: Try to extract publication date from HTML meta tags
-    let extractedDate = null;
-    if (pageText) {
-      // Try common meta date patterns in raw HTML (we have the raw html in proxyData)
-      const datePatterns = [
-        /["']datePublished["']\s*:\s*["']([^"']+)["']/i,
-        /["']article:published_time["'][^>]*content=["']([^"']+)["']/i,
-        /pubdate[^>]*content=["']([^"']+)["']/i,
-        /<time[^>]*datetime=["']([^"']+)["']/i,
-        /published_time.*?content="([^"]+)"/i
-      ];
-      // We don't have raw HTML here, we'll get it from Mistral
-    }
-
     // Step 2: Build article object
+    const now = new Date();
     const articleData = {
       id: generateId(),
       url: url,
@@ -191,10 +209,13 @@ async function importArticle() {
       content: pageText,
       domain: domainSelect || '',
       status: 'NEW',
-      date: new Date().toISOString(),      // import date (fallback)
-      publicationDate: null,               // will be set by Mistral
-      week: getWeekNumber(new Date()),
-      month: new Date().toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
+      date: now.toISOString(),
+      publicationDate: extractedPubDate,
+      week: extractedPubDate ? getWeekNumber(new Date(extractedPubDate)) : getWeekNumber(now),
+      weekYear: extractedPubDate ? getWeekYear(new Date(extractedPubDate)) : getWeekYear(now),
+      month: extractedPubDate
+        ? new Date(extractedPubDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' })
+        : now.toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
       favorite: false,
       summary: '',
       keyPoints: []
@@ -210,14 +231,15 @@ async function importArticle() {
     if (result.domain) articleData.domain = result.domain;
     if (!articleData.domain) articleData.domain = detectDomain(articleData.titleFr + ' ' + articleData.summary);
 
-    // Use publication date from article if found, else keep import date
-    if (result.publicationDate) {
+    // Use pub date: HTML extraction wins over Mistral (more reliable), Mistral is fallback
+    if (!articleData.publicationDate && result.publicationDate) {
       try {
-        const pubDate = new Date(result.publicationDate);
-        if (!isNaN(pubDate.getTime())) {
-          articleData.publicationDate = pubDate.toISOString();
-          articleData.week  = getWeekNumber(pubDate);
-          articleData.month = pubDate.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
+        const d = new Date(result.publicationDate);
+        if (!isNaN(d.getTime()) && d.getFullYear() > 2000) {
+          articleData.publicationDate = d.toISOString();
+          articleData.week    = getWeekNumber(d);
+          articleData.weekYear = getWeekYear(d);
+          articleData.month   = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
         }
       } catch(e) {}
     }
@@ -355,6 +377,17 @@ function detectDomain(text) {
 
 // ============ DUPLICATE DETECTION ============
 function findDuplicate(newArticle) {
+  // 1. Exact URL match — always a duplicate
+  if (newArticle.url) {
+    const urlDup = state.articles.find(a =>
+      a.id !== newArticle.id &&
+      a.status !== 'REJECTED' &&
+      a.url && normalizeUrl(a.url) === normalizeUrl(newArticle.url)
+    );
+    if (urlDup) return { article: urlDup, score: 100 };
+  }
+
+  // 2. Content similarity (only if both have meaningful text)
   const threshold = state.settings.duplicateThreshold / 100;
   for (const existing of state.articles) {
     if (existing.id === newArticle.id) continue;
@@ -367,10 +400,31 @@ function findDuplicate(newArticle) {
   return null;
 }
 
+function normalizeUrl(url) {
+  try {
+    const u = new URL(url);
+    // Remove utm params, trailing slashes, fragment
+    u.search = '';
+    u.hash = '';
+    return u.href.replace(/\/$/, '').toLowerCase();
+  } catch(e) { return url.toLowerCase().trim(); }
+}
+
 function computeSimilarity(a, b) {
-  const textA = normalizeText(a.title + ' ' + a.content + ' ' + a.summary);
-  const textB = normalizeText(b.title + ' ' + b.content + ' ' + b.summary);
-  return jaccardSimilarity(textA, textB);
+  // Use title + summary for comparison (content is too noisy and large)
+  const titleA = normalizeText((a.titleFr || a.title || ''));
+  const titleB = normalizeText((b.titleFr || b.title || ''));
+  const sumA   = normalizeText(a.summary || '');
+  const sumB   = normalizeText(b.summary || '');
+
+  // Title similarity weighted more heavily
+  const titleSim = jaccardSimilarity(titleA, titleB);
+  const sumSim   = (sumA && sumB) ? jaccardSimilarity(sumA, sumB) : 0;
+
+  // Weighted average: 70% title, 30% summary
+  return sumA && sumB
+    ? titleSim * 0.7 + sumSim * 0.3
+    : titleSim;
 }
 
 function normalizeText(text) {
@@ -384,6 +438,7 @@ function jaccardSimilarity(a, b) {
   const setA = new Set(a.split(' ').filter(w => w.length > 3));
   const setB = new Set(b.split(' ').filter(w => w.length > 3));
   if (setA.size === 0 && setB.size === 0) return 0;
+  if (setA.size === 0 || setB.size === 0) return 0;
   const intersection = new Set([...setA].filter(x => setB.has(x)));
   const union = new Set([...setA, ...setB]);
   return intersection.size / union.size;
@@ -773,17 +828,20 @@ function renderVeilleDomains() {
     const articles = byDomain[domain];
     if (articles.length === 0) return '';
 
-    // Group by week
+    // Group by week+year key to avoid cross-year collisions
     const byWeek = {};
     for (const a of articles) {
-      const key = `Semaine ${a.week || '?'}`;
-      if (!byWeek[key]) byWeek[key] = [];
-      byWeek[key].push(a);
+      const key = weekKey(a);
+      if (!byWeek[key]) byWeek[key] = { label: weekLabel(a), articles: [] };
+      byWeek[key].articles.push(a);
     }
 
-    const weekHtml = Object.entries(byWeek).map(([week, arts]) => `
+    // Sort weeks descending (most recent first)
+    const sortedWeeks = Object.entries(byWeek).sort((a, b) => b[0].localeCompare(a[0]));
+
+    const weekHtml = sortedWeeks.map(([key, { label, articles: arts }]) => `
       <div class="week-group">
-        <div class="week-label">${week}</div>
+        <div class="week-label">${label}</div>
         ${arts.map(a => `
           <div class="article-card" style="margin-bottom:8px">
             <div class="article-card-header">
@@ -791,8 +849,8 @@ function renderVeilleDomains() {
               <div class="article-card-actions">
                 <button class="action-btn ${a.favorite ? 'favorited' : ''}" onclick="toggleFavorite('${a.id}')" title="${a.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}">${a.favorite ? '⭐' : '☆'}</button>
                 <button class="action-btn" onclick="openArticleModal('${a.id}')" title="Voir">👁</button>
-                <button class="action-btn" onclick="unvalidateArticle('${a.id}')" title="Remettre en attente de validation" style="color:var(--warning)">↩</button>
-                <button class="action-btn" onclick="deleteArticleFromVeille('${a.id}')" title="Supprimer définitivement" style="color:var(--danger)">🗑</button>
+                <button class="action-btn" onclick="unvalidateArticle('${a.id}')" title="Remettre en attente" style="color:var(--warning)">↩</button>
+                <button class="action-btn" onclick="deleteArticleFromVeille('${a.id}')" title="Supprimer" style="color:var(--danger)">🗑</button>
               </div>
             </div>
             <div class="article-card-meta">
@@ -1413,76 +1471,158 @@ function exportConfluence() {
 
 function renderNewsletterWeekSelector() {
   const validated = state.articles.filter(a => a.status === 'VALIDATED');
-  const weeks = [...new Set(validated.map(a => a.week))].filter(Boolean).sort((a,b) => b - a);
+  // Build unique week keys with labels, sorted desc (most recent first)
+  const weekMap = {};
+  for (const a of validated) {
+    const key = weekKey(a);
+    if (!weekMap[key]) weekMap[key] = { label: weekLabel(a), count: 0 };
+    weekMap[key].count++;
+  }
+  const weeks = Object.entries(weekMap).sort((a, b) => b[0].localeCompare(a[0]));
+
   const container = document.getElementById('newsletter-weeks-container');
   if (!container) return;
   if (weeks.length === 0) {
     container.innerHTML = `<div style="color:var(--text-muted);font-size:12px">Aucun article validé</div>`;
     return;
   }
-  container.innerHTML = weeks.map(w => `
+  container.innerHTML = weeks.map(([key, { label, count }]) => `
     <label class="checkbox-item">
-      <input type="checkbox" value="${w}" checked class="newsletter-week-cb">
-      Semaine ${w} <span style="color:var(--text-muted);font-size:11px">(${validated.filter(a => a.week === w).length} articles)</span>
+      <input type="checkbox" value="${key}" checked class="newsletter-week-cb">
+      ${label} <span style="color:var(--text-muted);font-size:11px">(${count} article${count > 1 ? 's' : ''})</span>
     </label>
   `).join('');
 }
 
 function exportNewsletter() {
-  const selectedWeeks = [...document.querySelectorAll('.newsletter-week-cb:checked')].map(i => parseInt(i.value));
-  const title = document.getElementById('newsletter-title').value ||
-    (selectedWeeks.length === 1 ? `Veille IA — Semaine ${selectedWeeks[0]}` : `Veille IA — Semaines ${selectedWeeks.join(', ')}`);
-
-  if (selectedWeeks.length === 0) {
+  const selectedKeys = [...document.querySelectorAll('.newsletter-week-cb:checked')].map(i => i.value);
+  if (selectedKeys.length === 0) {
     showToast('⚠ Sélectionnez au moins une semaine', 'warning');
     return;
   }
 
-  const validated = state.articles.filter(a => a.status === 'VALIDATED' && selectedWeeks.includes(a.week));
+  const doMerge = document.getElementById('newsletter-merge')?.checked ?? true;
+  const validated = state.articles.filter(a => a.status === 'VALIDATED' && selectedKeys.includes(weekKey(a)));
 
-  // Merge articles on same topic (similarity > 70%)
-  const mergedGroups = groupSimilarArticles(validated);
-
-  let output = `${title}\n${'='.repeat(Math.min(title.length, 60))}\n\n`;
-
-  // Featured (favorites)
-  const featured = validated.filter(a => a.favorite);
-  if (featured.length > 0) {
-    output += `Articles à la une :\n`;
-    for (const w of selectedWeeks.sort()) {
-      const wArts = featured.filter(a => a.week === w);
-      if (wArts.length === 0) continue;
-      output += `Semaine ${w}:\n`;
-      wArts.forEach(a => output += `- ${a.titleFr || a.title}\n`);
-    }
-    output += '\n';
+  if (validated.length === 0) {
+    showToast('⚠ Aucun article validé pour les semaines sélectionnées', 'warning');
+    return;
   }
 
-  output += `Veille externe :\n\n`;
+  const label = selectedKeys.length === 1
+    ? weekMap_label(selectedKeys[0])
+    : `Semaines ${selectedKeys.map(k => k.replace('S','').replace(/-\d+/,'')).join(', ')}`;
 
-  const domains = Object.keys(DOMAIN_ICONS);
-  for (const domain of domains) {
-    const domainGroups = mergedGroups.filter(g => g.articles[0].domain === domain);
-    if (domainGroups.length === 0) continue;
-    output += `${domain} :\n`;
-    for (const w of selectedWeeks.sort()) {
-      const wGroups = domainGroups.filter(g => g.articles.some(a => a.week === w));
-      if (wGroups.length === 0) continue;
-      output += `Semaine ${w}:\n`;
-      wGroups.forEach(g => {
-        if (g.articles.length === 1) {
-          output += `- ${g.articles[0].titleFr || g.articles[0].title}\n`;
-        } else {
-          // Merged group — show combined title + all links
-          output += `- [SYNTHÈSE] ${g.mergedTitle}\n`;
-          g.articles.forEach(a => output += `  • ${a.titleFr || a.title}${a.url ? ' — ' + a.url : ''}\n`);
-        }
-      });
+  const titleVal = document.getElementById('newsletter-title').value.trim();
+  const title = titleVal || `Veille IA — ${label}`;
+
+  let output = `${title}\n${'─'.repeat(Math.min(title.length, 70))}\n\n`;
+
+  // ── Articles à la une (favoris) ──
+  const featured = validated.filter(a => a.favorite);
+  if (featured.length > 0) {
+    output += `⭐ Articles à la une\n\n`;
+    for (const key of selectedKeys) {
+      const wArts = featured.filter(a => weekKey(a) === key);
+      if (wArts.length === 0) continue;
+      output += `${weekMap_label(key)} :\n\n`;
+      wArts.forEach(a => { output += formatArticleNewsletter(a); });
     }
-    output += '\n';
+    output += '─'.repeat(60) + '\n\n';
+  }
+
+  // ── Par domaine ──
+  output += `Veille externe :\n\n`;
+  const domains = Object.keys(DOMAIN_ICONS);
+
+  for (const domain of domains) {
+    const domainArts = validated.filter(a => a.domain === domain);
+    if (domainArts.length === 0) continue;
+
+    const groups = doMerge ? groupSimilarArticles(domainArts) : domainArts.map(a => ({ articles: [a] }));
+
+    output += `${DOMAIN_ICONS[domain]} ${domain}\n\n`;
+
+    // Group by week within domain
+    for (const key of selectedKeys) {
+      const weekGroups = groups.filter(g => g.articles.some(a => weekKey(a) === key));
+      if (weekGroups.length === 0) continue;
+      output += `${weekMap_label(key)} :\n\n`;
+
+      for (const group of weekGroups) {
+        if (group.articles.length === 1) {
+          output += formatArticleNewsletter(group.articles[0]);
+        } else {
+          // Merged: show all links grouped under one block
+          const main = group.articles[0];
+          output += formatArticleNewsletterMerged(group.articles);
+        }
+      }
+    }
   }
 
   showExportPreview(output);
+}
+
+// Helper: get week label from key (e.g. "S17-2026" → "Semaine 17 — 2026")
+function weekMap_label(key) {
+  const m = key.match(/S(\d+)-(\d+)/);
+  if (m) return `Semaine ${parseInt(m[1])} — ${m[2]}`;
+  return key;
+}
+
+// Format a single article in the exact requested style
+function formatArticleNewsletter(a) {
+  const dateStr = a.publicationDate ? formatDateShort(a.publicationDate) : formatDateShort(a.date);
+  const link = a.url ? `🔗 Lire en ligne` : '';
+  const linkPart = a.url ? `[🔗 Lire en ligne](${a.url})` : '';
+  const points = (a.keyPoints || []).map(p => `• ${p}`).join('\n');
+
+  let block = '';
+  block += `${a.titleFr || a.title}\n`;
+  block += `${linkPart}${linkPart && dateStr ? ' | ' : ''}${dateStr}\n`;
+  block += `\n`;
+  block += `${a.summary || ''}\n`;
+  block += `\n`;
+  if (points) {
+    block += `Informations importantes :\n`;
+    block += `${points}\n`;
+  }
+  block += `\n`;
+  return block;
+}
+
+// Format merged articles (same topic, multiple sources)
+function formatArticleNewsletterMerged(articles) {
+  const main = articles[0];
+  const dateStr = main.publicationDate ? formatDateShort(main.publicationDate) : formatDateShort(main.date);
+
+  // Combine all unique key points
+  const allPoints = [];
+  articles.forEach(a => (a.keyPoints || []).forEach(p => { if (!allPoints.includes(p)) allPoints.push(p); }));
+  const points = allPoints.slice(0, 10).map(p => `• ${p}`).join('\n');
+
+  let block = '';
+  block += `${main.titleFr || main.title}\n`;
+  // Multiple links listed
+  articles.forEach(a => { if (a.url) block += `[🔗 Lire en ligne](${a.url}) | ${a.publicationDate ? formatDateShort(a.publicationDate) : formatDateShort(a.date)}\n`; });
+  block += `\n`;
+  block += `${main.summary || ''}\n`;
+  block += `\n`;
+  if (points) {
+    block += `Informations importantes :\n`;
+    block += `${points}\n`;
+  }
+  block += `\n`;
+  return block;
+}
+
+// "26 avr. 2026" format
+function formatDateShort(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch(e) { return iso; }
 }
 
 // Group articles with similar topics for newsletter merge
@@ -1528,14 +1668,27 @@ function formatArticleMarkdown(a) {
 function showExportPreview(content) {
   const preview = document.getElementById('export-preview');
   const copyBtn = document.getElementById('copy-btn');
-  preview.textContent = content;
-  if (copyBtn) { copyBtn.style.display = ''; copyBtn.dataset.content = content; }
-  showToast('✅ Export généré', 'success');
+  // Store raw for copy
+  preview.dataset.raw = content;
+  // Render with basic formatting for readability
+  preview.innerHTML = content
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\[🔗 Lire en ligne\]\((https?:\/\/[^\)]+)\)/g,
+      '<a href="$1" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a>')
+    .replace(/^(⭐.*|🛡.*|🏛.*|🏢.*|💻.*|🤖.*|🦾.*|⚖.*)$/gm,
+      '<strong style="color:var(--beige);font-size:14px">$1</strong>')
+    .replace(/^(Semaine \d+ — \d+) :$/gm,
+      '<span style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.8px">$1</span>')
+    .replace(/^(─+)$/gm, '<hr style="border-color:var(--navy-border);margin:8px 0">')
+    .replace(/\n/g, '<br>');
+
+  if (copyBtn) { copyBtn.style.display = ''; }
+  showToast('✅ Export généré — prêt à copier', 'success');
 }
 
 function copyExport() {
-  const btn = document.getElementById('copy-btn');
-  const content = document.getElementById('export-preview').textContent;
+  const preview = document.getElementById('export-preview');
+  const content = preview.dataset.raw || preview.textContent;
   navigator.clipboard.writeText(content).then(() => showToast('📋 Copié dans le presse-papier', 'success'));
 }
 
@@ -1725,6 +1878,27 @@ function getWeekNumber(d) {
   date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
   const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
   return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+}
+
+function getWeekYear(d) {
+  // Returns the ISO week year (can differ from calendar year in Jan/Dec)
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+  return date.getUTCFullYear();
+}
+
+// Returns "S17-2026" style key for grouping
+function weekKey(article) {
+  const w = article.week || getWeekNumber(new Date(article.publicationDate || article.date));
+  const y = article.weekYear || getWeekYear(new Date(article.publicationDate || article.date));
+  return `S${String(w).padStart(2,'0')}-${y}`;
+}
+
+// Returns "Semaine 17 — 2026" for display
+function weekLabel(article) {
+  const w = article.week || getWeekNumber(new Date(article.publicationDate || article.date));
+  const y = article.weekYear || getWeekYear(new Date(article.publicationDate || article.date));
+  return `Semaine ${w} — ${y}`;
 }
 
 function formatDate(iso) {
@@ -2036,6 +2210,8 @@ async function fetchAllFeeds(showUI = true) {
       feed.lastFetch = new Date().toISOString();
 
       for (const item of newItems.slice(0, 5)) { // max 5 per feed per scan
+        const pubD = item.pubDate ? (() => { try { const d = new Date(item.pubDate); return isNaN(d.getTime()) ? null : d; } catch(e) { return null; } })() : null;
+        const refDate = pubD || new Date();
         const article = {
           id: generateId(),
           url: item.link,
@@ -2045,11 +2221,10 @@ async function fetchAllFeeds(showUI = true) {
           domain: detectDomain(item.title + ' ' + item.description),
           status: 'PENDING_REVIEW',
           date: new Date().toISOString(),
-          publicationDate: item.pubDate ? (() => { try { return new Date(item.pubDate).toISOString(); } catch(e) { return null; } })() : null,
-          week: item.pubDate ? getWeekNumber(new Date(item.pubDate)) : getWeekNumber(new Date()),
-          month: item.pubDate
-            ? new Date(item.pubDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' })
-            : new Date().toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
+          publicationDate: pubD ? pubD.toISOString() : null,
+          week: getWeekNumber(refDate),
+          weekYear: getWeekYear(refDate),
+          month: refDate.toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
           favorite: false,
           summary: '',
           keyPoints: [],
@@ -2299,10 +2474,11 @@ async function generateRssSummaries(showProgress = false) {
       if (result.publicationDate) {
         try {
           const d = new Date(result.publicationDate);
-          if (!isNaN(d.getTime())) {
+          if (!isNaN(d.getTime()) && d.getFullYear() > 2000) {
             article.publicationDate = d.toISOString();
-            article.week  = getWeekNumber(d);
-            article.month = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
+            article.week     = getWeekNumber(d);
+            article.weekYear = getWeekYear(d);
+            article.month    = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
           }
         } catch(e) {}
       }
@@ -2460,232 +2636,186 @@ async function testFeedUrl(id) {
 }
 
 // ============================================================
-// SUPABASE SYNC
+// SUPABASE SYNC — credentials hardcodés
 // ============================================================
-// Uses Supabase REST API directly (no SDK needed)
-// Table structure required in Supabase:
-//   CREATE TABLE ia_platform (
-//     user_id TEXT NOT NULL,
-//     data_type TEXT NOT NULL,  -- 'articles' | 'rss_feeds' | 'settings'
-//     payload JSONB NOT NULL,
-//     updated_at TIMESTAMPTZ DEFAULT NOW(),
-//     PRIMARY KEY (user_id, data_type)
-//   );
-//   ALTER TABLE ia_platform ENABLE ROW LEVEL SECURITY;
-//   CREATE POLICY "anon read write" ON ia_platform FOR ALL USING (true) WITH CHECK (true);
-
-let sb = { url: '', key: '', userId: '' };
-
-function loadSupabaseConfig() {
-  const cfg = localStorage.getItem('ia_sb_config');
-  if (cfg) {
-    try { sb = JSON.parse(cfg); } catch(e) {}
-  }
-}
-
-function saveSupabaseConfig() {
-  const url = document.getElementById('sb-url').value.trim().replace(/\/$/, '');
-  const key = document.getElementById('sb-key').value.trim();
-  const userId = document.getElementById('sb-user-id').value.trim();
-
-  if (!url || !key || !userId) {
-    showToast('⚠ Remplissez tous les champs', 'warning'); return;
-  }
-
-  sb = { url, key, userId };
-  localStorage.setItem('ia_sb_config', JSON.stringify(sb));
-  closeModal('supabase-modal');
-  showToast('💾 Configuration Supabase sauvegardée — synchronisation...', 'success');
-  syncNow();
-}
-
-async function testSupabaseConnection() {
-  const url = document.getElementById('sb-url').value.trim().replace(/\/$/, '');
-  const key = document.getElementById('sb-key').value.trim();
-  const infoEl = document.getElementById('sb-setup-info');
-  if (!url || !key) { showToast('⚠ Entrez URL et clé', 'warning'); return; }
-
-  try {
-    const resp = await fetch(`${url}/rest/v1/ia_platform?select=user_id&limit=1`, {
-      headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
-    });
-    if (infoEl) {
-      infoEl.style.display = 'flex';
-      if (resp.ok || resp.status === 200) {
-        infoEl.innerHTML = '<span>✅</span><span>Connexion réussie — table <strong>ia_platform</strong> trouvée.</span>';
-        infoEl.style.background = 'var(--success-bg)';
-        infoEl.style.borderColor = 'rgba(52,211,153,0.3)';
-      } else if (resp.status === 404) {
-        infoEl.innerHTML = '<span>⚠</span><span>Connecté, mais la table <strong>ia_platform</strong> n\'existe pas encore. Créez-la avec le SQL ci-dessous dans l\'éditeur Supabase.</span>';
-        infoEl.style.background = 'var(--warning-bg)';
-        infoEl.style.borderColor = 'rgba(251,191,36,0.3)';
-      } else {
-        infoEl.innerHTML = `<span>❌</span><span>Erreur ${resp.status} — vérifiez votre URL et clé API.</span>`;
-        infoEl.style.background = 'var(--danger-bg)';
-        infoEl.style.borderColor = 'rgba(248,113,113,0.3)';
-      }
-    }
-  } catch(e) {
-    if (infoEl) {
-      infoEl.style.display = 'flex';
-      infoEl.innerHTML = `<span>❌</span><span>Impossible de joindre Supabase : ${e.message}</span>`;
-    }
-  }
-}
-
-async function syncNow() {
-  if (!sb.url || !sb.key || !sb.userId) {
-    showToast('⚠ Configurez d\'abord Supabase dans Paramètres', 'warning');
-    openModal('supabase-modal');
-    return;
-  }
-
-  const resultEl = document.getElementById('sync-result');
-  if (resultEl) { resultEl.style.display = 'none'; }
-
-  try {
-    // 1. Pull remote data
-    const pullResp = await sbFetch(`/rest/v1/ia_platform?user_id=eq.${encodeURIComponent(sb.userId)}&select=data_type,payload,updated_at`);
-    if (!pullResp.ok) throw new Error('Pull failed: ' + pullResp.status);
-    const remoteRows = await pullResp.json();
-
-    const remoteArticlesRow = remoteRows.find(r => r.data_type === 'articles');
-    const remoteFeedsRow = remoteRows.find(r => r.data_type === 'rss_feeds');
-    const remoteSettingsRow = remoteRows.find(r => r.data_type === 'settings');
-
-    // 2. Merge articles (union by id, remote wins on conflict)
-    if (remoteArticlesRow?.payload?.articles) {
-      const remoteArticles = remoteArticlesRow.payload.articles;
-      const localIds = new Set(state.articles.map(a => a.id));
-      const remoteIds = new Set(remoteArticles.map(a => a.id));
-
-      // Add remote articles not in local
-      remoteArticles.forEach(ra => {
-        if (!localIds.has(ra.id)) state.articles.push(ra);
-        else {
-          // If remote is newer, update local
-          const localIdx = state.articles.findIndex(a => a.id === ra.id);
-          if (localIdx !== -1 && ra.date > state.articles[localIdx].date) {
-            state.articles[localIdx] = ra;
-          }
-        }
-      });
-    }
-
-    // Merge RSS feeds
-    if (remoteFeedsRow?.payload?.feeds) {
-      const remoteFeeds = remoteFeedsRow.payload.feeds;
-      const localFeedIds = new Set(state.rssFeeds.map(f => f.id));
-      remoteFeeds.forEach(rf => { if (!localFeedIds.has(rf.id)) state.rssFeeds.push(rf); });
-    }
-
-    // Merge settings (keep local mistralKey private, sync rest)
-    if (remoteSettingsRow?.payload?.settings) {
-      const rs = remoteSettingsRow.payload.settings;
-      state.settings = {
-        ...rs,
-        mistralKey: state.settings.mistralKey // never sync API key to cloud
-      };
-    }
-
-    // 3. Push local data to remote (upsert)
-    const now = new Date().toISOString();
-    const upsertData = [
-      { user_id: sb.userId, data_type: 'articles', payload: { articles: state.articles }, updated_at: now },
-      { user_id: sb.userId, data_type: 'rss_feeds', payload: { feeds: state.rssFeeds }, updated_at: now },
-      { user_id: sb.userId, data_type: 'settings', payload: { settings: { ...state.settings, mistralKey: '' } }, updated_at: now }
-    ];
-
-    const pushResp = await sbFetch('/rest/v1/ia_platform', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates' },
-      body: JSON.stringify(upsertData)
-    });
-    if (!pushResp.ok) throw new Error('Push failed: ' + pushResp.status);
-
-    state.settings.lastSyncDate = now;
-    saveToStorage();
-    renderAllViews();
-    updateStats();
-    updateSyncUI(true);
-    showToast('☁ Synchronisation réussie', 'success');
-
-  } catch(e) {
-    console.error('Sync error:', e);
-    updateSyncUI(false, e.message);
-    showToast('❌ Erreur de sync : ' + e.message, 'error');
-  }
-}
+const sb = {
+  url:    'https://hxfolotdvcefmbvqceom.supabase.co',
+  key:    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh4Zm9sb3RkdmNlZm1idnFjZW9tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMDYwMDIsImV4cCI6MjA5MDc4MjAwMn0.EqOCYvXssghS6HPJwUUGVoAt1gcGLmf2oDdsZbeaH10',
+  userId: 'hxfolotdvcefmbvqceom'
+};
 
 function sbFetch(path, options = {}) {
   return fetch(`${sb.url}${path}`, {
     ...options,
     headers: {
-      'apikey': sb.key,
+      'apikey':        sb.key,
       'Authorization': `Bearer ${sb.key}`,
-      'Content-Type': 'application/json',
+      'Content-Type':  'application/json',
       ...(options.headers || {})
     }
   });
 }
 
-function updateSyncUI(success, errMsg) {
-  const label = document.getElementById('sync-status-label');
-  const infoRow = document.getElementById('sync-info-row');
-  const syncBtn = document.getElementById('sync-now-btn');
-  const disconnectBtn = document.getElementById('disconnect-sync-btn');
-  const lastSyncEl = document.getElementById('sb-last-sync');
-  const userEl = document.getElementById('sb-user-display');
-  const projectEl = document.getElementById('sb-project-name');
+// ── Sync complète : pull → merge → push ──────────────────────
+async function syncNow(silent = false) {
+  if (!silent) showLoading('Synchronisation Supabase...');
   const resultEl = document.getElementById('sync-result');
+  if (resultEl) resultEl.style.display = 'none';
 
-  const isConfigured = !!(sb.url && sb.key && sb.userId);
+  try {
+    // 1. PULL depuis Supabase
+    const pullResp = await sbFetch(
+      `/rest/v1/ia_platform?user_id=eq.${encodeURIComponent(sb.userId)}&select=data_type,payload,updated_at`
+    );
+    if (!pullResp.ok) throw new Error(`Pull HTTP ${pullResp.status}`);
+    const remoteRows = await pullResp.json();
+
+    const remoteArticlesRow = remoteRows.find(r => r.data_type === 'articles');
+    const remoteFeedsRow    = remoteRows.find(r => r.data_type === 'rss_feeds');
+
+    // 2. MERGE articles : union par id, le plus récent gagne
+    if (remoteArticlesRow?.payload?.articles?.length) {
+      const remote = remoteArticlesRow.payload.articles;
+      const localMap = new Map(state.articles.map(a => [a.id, a]));
+
+      remote.forEach(ra => {
+        if (!localMap.has(ra.id)) {
+          // Article distant absent en local → on l'ajoute
+          state.articles.push(ra);
+          localMap.set(ra.id, ra);
+        } else {
+          // Même id : le plus récemment modifié gagne
+          const local = localMap.get(ra.id);
+          const remoteTs = new Date(ra.updatedAt || ra.date || 0).getTime();
+          const localTs  = new Date(local.updatedAt || local.date || 0).getTime();
+          if (remoteTs > localTs) {
+            const idx = state.articles.findIndex(a => a.id === ra.id);
+            if (idx !== -1) state.articles[idx] = ra;
+          }
+        }
+      });
+
+      // Articles locaux absents du remote → on les gardera dans le push
+    }
+
+    // 3. MERGE flux RSS
+    if (remoteFeedsRow?.payload?.feeds?.length) {
+      const remoteFeeds = remoteFeedsRow.payload.feeds;
+      const localFeedIds = new Set(state.rssFeeds.map(f => f.id));
+      remoteFeeds.forEach(rf => {
+        if (!localFeedIds.has(rf.id)) state.rssFeeds.push(rf);
+      });
+    }
+
+    // 4. PUSH état local complet vers Supabase (upsert)
+    const now = new Date().toISOString();
+
+    // Ajouter updatedAt sur chaque article pour le prochain merge
+    state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date; });
+
+    const upsertData = [
+      {
+        user_id:    sb.userId,
+        data_type:  'articles',
+        payload:    { articles: state.articles },
+        updated_at: now
+      },
+      {
+        user_id:    sb.userId,
+        data_type:  'rss_feeds',
+        payload:    { feeds: state.rssFeeds },
+        updated_at: now
+      },
+      {
+        user_id:    sb.userId,
+        data_type:  'settings',
+        payload:    { settings: { ...state.settings, mistralKey: '' } }, // clé Mistral jamais en cloud
+        updated_at: now
+      }
+    ];
+
+    const pushResp = await sbFetch('/rest/v1/ia_platform', {
+      method:  'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates' },
+      body:    JSON.stringify(upsertData)
+    });
+    if (!pushResp.ok) throw new Error(`Push HTTP ${pushResp.status}`);
+
+    state.settings.lastSyncDate = now;
+    saveToStorage();
+    if (!silent) hideLoading();
+    renderAllViews();
+    updateStats();
+    updateSyncUI(true);
+    if (!silent) showToast('☁ Synchronisation réussie', 'success');
+
+  } catch(e) {
+    if (!silent) hideLoading();
+    console.error('Sync error:', e);
+    updateSyncUI(false, e.message);
+    if (!silent) showToast('❌ Erreur de sync : ' + e.message, 'error');
+  }
+}
+
+// ── Appel auto après chaque modification importante ──────────
+function syncAfterChange() {
+  // Debounce : attend 2 s après la dernière modif avant de syncer
+  clearTimeout(syncAfterChange._timer);
+  syncAfterChange._timer = setTimeout(() => syncNow(true), 2000);
+}
+
+// Surcharge de saveToStorage pour déclencher la sync automatique
+const _origSave = saveToStorage;
+// (on patche après le chargement dans le second DOMContentLoaded)
+
+function updateSyncUI(success, errMsg) {
+  const label      = document.getElementById('sync-status-label');
+  const infoRow    = document.getElementById('sync-info-row');
+  const syncBtn    = document.getElementById('sync-now-btn');
+  const disconnBtn = document.getElementById('disconnect-sync-btn');
+  const lastSyncEl = document.getElementById('sb-last-sync');
+  const userEl     = document.getElementById('sb-user-display');
+  const projectEl  = document.getElementById('sb-project-name');
+  const resultEl   = document.getElementById('sync-result');
 
   if (label) {
-    label.textContent = !isConfigured ? 'Non configuré' : success ? '✅ Synchronisé' : '⚠ Erreur';
-    label.style.color = !isConfigured ? 'var(--text-muted)' : success ? 'var(--success)' : 'var(--warning)';
+    label.textContent = success ? '✅ Synchronisé' : '⚠ Erreur';
+    label.style.color = success ? 'var(--success)' : 'var(--warning)';
   }
-  if (infoRow) infoRow.style.display = isConfigured ? '' : 'none';
-  if (syncBtn) syncBtn.style.display = isConfigured ? '' : 'none';
-  if (disconnectBtn) disconnectBtn.style.display = isConfigured ? '' : 'none';
-  if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
-  if (userEl) userEl.textContent = sb.userId || '—';
-  if (projectEl) projectEl.textContent = sb.url ? extractDomainName(sb.url) : '—';
+  if (infoRow)    infoRow.style.display    = '';
+  if (syncBtn)    syncBtn.style.display    = '';
+  if (disconnBtn) disconnBtn.style.display = 'none'; // pas de déconnexion possible (hardcodé)
+  if (lastSyncEl) lastSyncEl.textContent   = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
+  if (userEl)     userEl.textContent       = sb.userId;
+  if (projectEl)  projectEl.textContent    = 'hxfolotdvcefmbvqceom';
   if (resultEl && errMsg) {
-    resultEl.textContent = '❌ ' + errMsg;
-    resultEl.className = 'connection-status error';
+    resultEl.textContent  = '❌ ' + errMsg;
+    resultEl.className    = 'connection-status error';
+    resultEl.style.display = 'block';
   }
 }
 
-function disconnectSync() {
-  if (!confirm('Déconnecter la synchronisation ? Vos données locales sont conservées.')) return;
-  sb = { url: '', key: '', userId: '' };
-  localStorage.removeItem('ia_sb_config');
-  updateSyncUI(false);
-  showToast('🔌 Synchronisation déconnectée', 'warning');
-}
-
-function generateUserId() {
-  const id = 'user-' + Math.random().toString(36).substr(2, 10);
-  document.getElementById('sb-user-id').value = id;
-}
-
-function openModal(id) {
-  document.getElementById(id)?.classList.remove('hidden');
-}
+// Fonctions stub (plus nécessaires mais appelées depuis HTML)
+function saveSupabaseConfig() { showToast('✅ Base de données déjà configurée', 'success'); closeModal('supabase-modal'); }
+function testSupabaseConnection() { syncNow(false); }
+function disconnectSync() { showToast('ℹ Base de données intégrée — non modifiable', 'info'); }
+function generateUserId() {}
+function openModal(id) { document.getElementById(id)?.classList.remove('hidden'); }
 
 // ============================================================
-// INIT: load Supabase config and schedule RSS on startup
+// INIT FINAL : sync au démarrage + RSS auto
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
-  loadSupabaseConfig();
-  updateSyncUI(!!(sb.url && sb.key && sb.userId));
+  // Sync immédiate au démarrage (silent = false pour afficher le résultat)
+  syncNow(false);
 
-  // Auto-sync on open if configured
-  if (sb.url && sb.key && sb.userId) {
-    syncNow();
-  }
+  // Patch saveToStorage pour syncer auto après chaque sauvegarde
+  const originalSave = saveToStorage;
+  window.saveToStorage = function() {
+    originalSave();
+    syncAfterChange();
+  };
 
   // Schedule RSS auto-fetch
   scheduleRssAutoFetch();
-}, { once: true }); // 'once' ensures this second DOMContentLoaded doesn't conflict
+}, { once: true });
