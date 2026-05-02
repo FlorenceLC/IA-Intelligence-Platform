@@ -468,17 +468,17 @@ function renderValidationQueue() {
         <div class="validation-meta">
           <span class="domain-badge ${domainClass(article.domain)}">${DOMAIN_ICONS[article.domain] || ''} ${article.domain}</span>
           <span class="status-badge ${statusClass(article.status)}">${statusLabel(article.status)}</span>
-          <span>${formatDate(article.date)}</span>
-          ${article.status === 'DUPLICATE_SUSPECTED' ? `<span style="color:var(--warning)">⚠ Doublon suspecté</span>` : ''}
+          <span>${formatDate(article.publicationDate || article.date)}</span>
+          ${article.status === 'DUPLICATE_SUSPECTED' ? `<span style="color:var(--warning)">⚠ Doublon</span>` : ''}
         </div>
       </div>
       <div class="validation-actions">
         ${article.status === 'DUPLICATE_SUSPECTED'
-          ? `<button class="btn-warning small" onclick="reopenDuplicateModal('${article.id}')">⚠ Voir doublon</button>`
+          ? `<button class="val-btn val-btn-warning" onclick="reopenDuplicateModal('${article.id}')">⚠ Doublon</button>`
           : ''}
-        <button class="btn-success small" onclick="validateArticle('${article.id}')">✅ Valider</button>
-        <button class="btn-secondary small" onclick="openArticleModal('${article.id}')">👁 Voir</button>
-        <button class="btn-danger small" onclick="rejectArticleById('${article.id}')">❌ Rejeter</button>
+        <button class="val-btn val-btn-success" onclick="validateArticle('${article.id}')">✅ Valider</button>
+        <button class="val-btn val-btn-secondary" onclick="openArticleModal('${article.id}')">👁 Voir</button>
+        <button class="val-btn val-btn-danger" onclick="rejectArticleById('${article.id}')">❌ Rejeter</button>
       </div>
     </div>
   `).join('');
@@ -507,6 +507,25 @@ function unvalidateArticle(id) {
   renderSavedArticles();
   updateStats();
   showToast('↩ Article remis en attente de validation', 'warning');
+}
+
+// Capitaliser = marquer comme traité/exporté et masquer de la veille
+function capitaliseArticle(id) {
+  const article = state.articles.find(a => a.id === id);
+  if (!article) return;
+  article.status = 'CAPITALISED';
+  article.capitalisedAt = new Date().toISOString();
+  // Retirer du DOM immédiatement sans attendre le re-render
+  const card = document.getElementById(`veille-card-${id}`);
+  if (card) {
+    card.style.transition = 'opacity 0.3s, transform 0.3s';
+    card.style.opacity = '0';
+    card.style.transform = 'translateX(20px)';
+    setTimeout(() => { card.remove(); }, 300);
+  }
+  saveToStorage();
+  updateStats();
+  showToast('✓ Article capitalisé — masqué de la veille', 'success');
 }
 
 function deleteArticleFromVeille(id) {
@@ -720,14 +739,53 @@ function renderArticleCard(a) {
   `;
 }
 
+// Suppression définitive — sync immédiate vers Supabase
 function deleteArticle(id) {
-  if (!confirm('Supprimer cet article ?')) return;
+  if (!confirm('Supprimer définitivement cet article ?')) return;
+  _hardDelete(id);
+}
+
+function deleteArticleFromVeille(id) {
+  const article = state.articles.find(a => a.id === id);
+  if (!article) return;
+  const title = (article.titleFr || article.title || '').substring(0, 60);
+  if (!confirm(`Supprimer définitivement :\n« ${title} » ?`)) return;
+  _hardDelete(id);
+}
+
+function _hardDelete(id) {
   state.articles = state.articles.filter(a => a.id !== id);
-  saveToStorage();
+  defenseRows = defenseRows.filter(r => r.sourceId !== id);
+  // Sauvegarde locale immédiate
+  try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+  // Push immédiat vers Supabase (pas de debounce — on veut que ce soit instantané)
+  _pushToSupabase();
+  // Refresh UI
   renderSavedArticles();
   renderValidationQueue();
+  renderVeille();
   updateStats();
-  showToast('🗑 Article supprimé', 'warning');
+  showToast('🗑 Article supprimé sur tous les appareils', 'warning');
+}
+
+// Push direct sans merge (écrase le remote avec l'état local courant)
+async function _pushToSupabase() {
+  try {
+    const now = new Date().toISOString();
+    state.articles.forEach(a => { a.updatedAt = a.updatedAt || a.date; });
+    await sbFetch('/rest/v1/ia_platform', {
+      method:  'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify([
+        { user_id: sb.userId, data_type: 'articles',  payload: { articles: state.articles }, updated_at: now },
+        { user_id: sb.userId, data_type: 'rss_feeds', payload: { feeds: state.rssFeeds },    updated_at: now }
+      ])
+    });
+    state.settings.lastSyncDate = now;
+    updateSyncUI(true);
+  } catch(e) {
+    console.error('Push error:', e);
+  }
 }
 
 function filterArticles() { renderSavedArticles(0); }
@@ -814,7 +872,7 @@ function renderVeilleFeatured() {
 }
 
 function renderVeilleDomains() {
-  const validated = state.articles.filter(a => a.status === 'VALIDATED');
+  const validated = state.articles.filter(a => a.status === 'VALIDATED'); // CAPITALISED excluded
   const container = document.getElementById('veille-domains');
   if (!container) return;
 
@@ -843,12 +901,13 @@ function renderVeilleDomains() {
       <div class="week-group">
         <div class="week-label">${label}</div>
         ${arts.map(a => `
-          <div class="article-card" style="margin-bottom:8px">
+          <div class="article-card" style="margin-bottom:8px" id="veille-card-${a.id}">
             <div class="article-card-header">
               <div class="article-card-title" onclick="openArticleModal('${a.id}')">${escHtml(a.titleFr || a.title)}</div>
               <div class="article-card-actions">
                 <button class="action-btn ${a.favorite ? 'favorited' : ''}" onclick="toggleFavorite('${a.id}')" title="${a.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}">${a.favorite ? '⭐' : '☆'}</button>
                 <button class="action-btn" onclick="openArticleModal('${a.id}')" title="Voir">👁</button>
+                <button class="btn-capitalise" onclick="capitaliseArticle('${a.id}')" title="Marquer comme capitalisé et masquer">✓ Capitalisé</button>
                 <button class="action-btn" onclick="unvalidateArticle('${a.id}')" title="Remettre en attente" style="color:var(--warning)">↩</button>
                 <button class="action-btn" onclick="deleteArticleFromVeille('${a.id}')" title="Supprimer" style="color:var(--danger)">🗑</button>
               </div>
@@ -1435,34 +1494,51 @@ function exportConfluence() {
   let articles = state.articles.filter(a => a.status === 'VALIDATED' && selectedDomains.includes(a.domain));
 
   if (period === 'week') {
-    const thisWeek = getWeekNumber(new Date());
-    articles = articles.filter(a => a.week === thisWeek);
+    const w = getWeekNumber(new Date()); const y = getWeekYear(new Date());
+    articles = articles.filter(a => a.week === w && (a.weekYear || y) === y);
   } else if (period === 'month') {
     const thisMonth = new Date().toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
     articles = articles.filter(a => a.month === thisMonth);
   }
 
-  let output = `# Veille Stratégique IA\n`;
-  output += `**Généré le :** ${new Date().toLocaleDateString('fr-FR')}\n\n---\n\n`;
-
-  // Featured
-  const featured = articles.filter(a => a.favorite);
-  if (featured.length > 0) {
-    output += `## ⭐ Articles à la une\n\n`;
-    featured.forEach(a => output += formatArticleMarkdown(a));
-    output += '\n---\n\n';
+  if (articles.length === 0) {
+    showToast('⚠ Aucun article pour cette période / ces domaines', 'warning');
+    return;
   }
 
-  // By domain
-  const domains = [...new Set(articles.map(a => a.domain))];
+  let output = `Veille Stratégique IA\n`;
+  output += `Généré le ${new Date().toLocaleDateString('fr-FR')}\n`;
+  output += '═'.repeat(60) + '\n\n';
+
+  // ── Articles à la une ──
+  const featured = articles.filter(a => a.favorite);
+  if (featured.length > 0) {
+    output += `⭐ Articles à la une\n\n`;
+    featured.forEach(a => { output += formatArticleNewsletter(a); });
+    output += '─'.repeat(60) + '\n\n';
+  }
+
+  // ── Par domaine, par semaine, résumés complets ──
+  const domains = Object.keys(DOMAIN_ICONS);
   for (const domain of domains) {
-    const domainArticles = articles.filter(a => a.domain === domain);
-    if (domainArticles.length === 0) continue;
-    output += `## ${DOMAIN_ICONS[domain]} ${domain}\n\n`;
-    const weeks = [...new Set(domainArticles.map(a => a.week))].sort();
-    for (const week of weeks) {
-      output += `### Semaine ${week}\n\n`;
-      domainArticles.filter(a => a.week === week).forEach(a => output += formatArticleMarkdown(a));
+    const domainArts = articles.filter(a => a.domain === domain);
+    if (domainArts.length === 0) continue;
+
+    output += `${DOMAIN_ICONS[domain]} ${domain}\n`;
+    output += '─'.repeat(40) + '\n\n';
+
+    // Group by week, most recent first
+    const byWeek = {};
+    domainArts.forEach(a => {
+      const key = weekKey(a);
+      if (!byWeek[key]) byWeek[key] = [];
+      byWeek[key].push(a);
+    });
+    const sortedWeeks = Object.entries(byWeek).sort((a, b) => b[0].localeCompare(a[0]));
+
+    for (const [key, arts] of sortedWeeks) {
+      output += `${weekMap_label(key)} :\n\n`;
+      arts.forEach(a => { output += formatArticleNewsletter(a); });
     }
   }
 
@@ -1471,7 +1547,6 @@ function exportConfluence() {
 
 function renderNewsletterWeekSelector() {
   const validated = state.articles.filter(a => a.status === 'VALIDATED');
-  // Build unique week keys with labels, sorted desc (most recent first)
   const weekMap = {};
   for (const a of validated) {
     const key = weekKey(a);
@@ -1479,7 +1554,6 @@ function renderNewsletterWeekSelector() {
     weekMap[key].count++;
   }
   const weeks = Object.entries(weekMap).sort((a, b) => b[0].localeCompare(a[0]));
-
   const container = document.getElementById('newsletter-weeks-container');
   if (!container) return;
   if (weeks.length === 0) {
@@ -1496,68 +1570,46 @@ function renderNewsletterWeekSelector() {
 
 function exportNewsletter() {
   const selectedKeys = [...document.querySelectorAll('.newsletter-week-cb:checked')].map(i => i.value);
-  if (selectedKeys.length === 0) {
-    showToast('⚠ Sélectionnez au moins une semaine', 'warning');
-    return;
-  }
+  if (selectedKeys.length === 0) { showToast('⚠ Sélectionnez au moins une semaine', 'warning'); return; }
 
-  const doMerge = document.getElementById('newsletter-merge')?.checked ?? true;
   const validated = state.articles.filter(a => a.status === 'VALIDATED' && selectedKeys.includes(weekKey(a)));
-
-  if (validated.length === 0) {
-    showToast('⚠ Aucun article validé pour les semaines sélectionnées', 'warning');
-    return;
-  }
-
-  const label = selectedKeys.length === 1
-    ? weekMap_label(selectedKeys[0])
-    : `Semaines ${selectedKeys.map(k => k.replace('S','').replace(/-\d+/,'')).join(', ')}`;
+  if (validated.length === 0) { showToast('⚠ Aucun article validé pour les semaines sélectionnées', 'warning'); return; }
 
   const titleVal = document.getElementById('newsletter-title').value.trim();
-  const title = titleVal || `Veille IA — ${label}`;
+  const title = titleVal || `Veille IA`;
+  let output = `${title}\n${'═'.repeat(Math.min(title.length, 60))}\n\n`;
 
-  let output = `${title}\n${'─'.repeat(Math.min(title.length, 70))}\n\n`;
+  // Sort selected keys chronologically (oldest first for display)
+  const sortedKeys = [...selectedKeys].sort((a, b) => a.localeCompare(b));
 
-  // ── Articles à la une (favoris) ──
+  // ── Articles à la une ──
   const featured = validated.filter(a => a.favorite);
   if (featured.length > 0) {
-    output += `⭐ Articles à la une\n\n`;
-    for (const key of selectedKeys) {
-      const wArts = featured.filter(a => weekKey(a) === key);
-      if (wArts.length === 0) continue;
-      output += `${weekMap_label(key)} :\n\n`;
-      wArts.forEach(a => { output += formatArticleNewsletter(a); });
+    output += `Articles à la une :\n`;
+    for (const key of sortedKeys) {
+      const arts = featured.filter(a => weekKey(a) === key);
+      if (arts.length === 0) continue;
+      output += `    - ${weekMap_label(key)}\n`;
+      arts.forEach(a => { output += `        - ${a.titleFr || a.title}\n`; });
     }
-    output += '─'.repeat(60) + '\n\n';
+    output += '\n';
   }
 
-  // ── Par domaine ──
-  output += `Veille externe :\n\n`;
+  // ── Veille extérieure par domaine ──
+  output += `Veille extérieure :\n`;
   const domains = Object.keys(DOMAIN_ICONS);
 
   for (const domain of domains) {
     const domainArts = validated.filter(a => a.domain === domain);
     if (domainArts.length === 0) continue;
 
-    const groups = doMerge ? groupSimilarArticles(domainArts) : domainArts.map(a => ({ articles: [a] }));
+    output += `    - ${DOMAIN_ICONS[domain]} ${domain} :\n`;
 
-    output += `${DOMAIN_ICONS[domain]} ${domain}\n\n`;
-
-    // Group by week within domain
-    for (const key of selectedKeys) {
-      const weekGroups = groups.filter(g => g.articles.some(a => weekKey(a) === key));
-      if (weekGroups.length === 0) continue;
-      output += `${weekMap_label(key)} :\n\n`;
-
-      for (const group of weekGroups) {
-        if (group.articles.length === 1) {
-          output += formatArticleNewsletter(group.articles[0]);
-        } else {
-          // Merged: show all links grouped under one block
-          const main = group.articles[0];
-          output += formatArticleNewsletterMerged(group.articles);
-        }
-      }
+    for (const key of sortedKeys) {
+      const arts = domainArts.filter(a => weekKey(a) === key);
+      if (arts.length === 0) continue;
+      output += `        - ${weekMap_label(key)}\n`;
+      arts.forEach(a => { output += `            - ${a.titleFr || a.title}\n`; });
     }
   }
 
@@ -1919,12 +1971,12 @@ function domainClass(domain) {
 }
 
 function statusClass(status) {
-  const map = { 'NEW': 'new', 'PENDING_REVIEW': 'pending', 'VALIDATED': 'validated', 'REJECTED': 'rejected', 'DUPLICATE_SUSPECTED': 'duplicate', 'MERGED': 'merged' };
+  const map = { 'NEW': 'new', 'PENDING_REVIEW': 'pending', 'VALIDATED': 'validated', 'REJECTED': 'rejected', 'DUPLICATE_SUSPECTED': 'duplicate', 'MERGED': 'merged', 'CAPITALISED': 'validated' };
   return map[status] || 'new';
 }
 
 function statusLabel(status) {
-  const map = { 'NEW': 'Nouveau', 'PENDING_REVIEW': 'En attente', 'VALIDATED': 'Validé', 'REJECTED': 'Rejeté', 'DUPLICATE_SUSPECTED': 'Doublon ?', 'MERGED': 'Fusionné' };
+  const map = { 'NEW': 'Nouveau', 'PENDING_REVIEW': 'En attente', 'VALIDATED': 'Validé', 'REJECTED': 'Rejeté', 'DUPLICATE_SUSPECTED': 'Doublon ?', 'MERGED': 'Fusionné', 'CAPITALISED': 'Capitalisé' };
   return map[status] || status;
 }
 
