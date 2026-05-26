@@ -106,7 +106,7 @@ function switchTab(tab) {
   }
   if (tab === 'veille') renderVeille();
   if (tab === 'analyse') renderAnalyse();
-  if (tab === 'settings') renderSettings();
+  if (tab === 'settings') { renderSettings(); renderGistSettings(); }
   if (tab === 'rss') renderRssTab();
   if (tab === 'export') renderNewsletterWeekSelector();
 }
@@ -2688,13 +2688,18 @@ async function testFeedUrl(id) {
 }
 
 // ============================================================
-// GITHUB GIST SYNC — credentials hardcodés
+// GITHUB GIST SYNC — credentials saisis par l'utilisateur
 // ============================================================
 const GIST = {
-  token:  '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',
-  gistId: '991049ab379d0dc41a5ae7ee99bffbe9',
-  file:   'ia_platform_data.json'
+  get token()  { return localStorage.getItem('gist_token')  || ''; },
+  get gistId() { return localStorage.getItem('gist_id')     || ''; },
+  get file()   { return localStorage.getItem('gist_file')   || 'ia_platform_data.json'; },
+  set file(v)  { localStorage.setItem('gist_file', v); }
 };
+
+function gistConfigured() {
+  return !!(GIST.token && GIST.gistId);
+}
 
 const GIST_HEADERS = {
   'Authorization': `token ${GIST.token}`,
@@ -2770,6 +2775,12 @@ function mergeFeeds(local, remote) {
 }
 
 async function syncNow(silent = false) {
+  if (!gistConfigured()) {
+    if (!silent) showToast('⚠ Configurez le Gist dans Paramètres', 'warning');
+    renderAllViews();
+    updateStats();
+    return;
+  }
   if (!silent) showLoading('Synchronisation Gist...');
   const resultEl = document.getElementById('sync-result');
   if (resultEl) resultEl.style.display = 'none';
@@ -2851,26 +2862,105 @@ function syncAfterChange() {
 function updateSyncUI(success, errMsg) {
   const label      = document.getElementById('sync-status-label');
   const lastSyncEl = document.getElementById('sb-last-sync');
-  const userEl     = document.getElementById('sb-user-display');
-  const projectEl  = document.getElementById('sb-project-name');
+  const gistIdEl   = document.getElementById('sb-project-name');
   const resultEl   = document.getElementById('sync-result');
 
+  const configured = gistConfigured();
+
   if (label) {
-    label.textContent = success ? '✅ Synchronisé' : '⚠ Erreur';
-    label.style.color = success ? 'var(--success)' : 'var(--warning)';
+    if (!configured) { label.textContent = 'Non configuré'; label.style.color = 'var(--text-muted)'; }
+    else if (success) { label.textContent = '✅ Synchronisé'; label.style.color = 'var(--success)'; }
+    else { label.textContent = '⚠ Erreur'; label.style.color = 'var(--warning)'; }
   }
   if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
-  if (userEl)     userEl.textContent     = 'Gist privé';
-  if (projectEl)  projectEl.textContent  = GIST.gistId.substring(0, 12) + '...';
+  if (gistIdEl)   gistIdEl.textContent   = GIST.gistId ? GIST.gistId.substring(0, 14) + '...' : '—';
   if (resultEl && errMsg) {
     resultEl.textContent   = '❌ ' + errMsg;
     resultEl.className     = 'connection-status error';
     resultEl.style.display = 'block';
+  } else if (resultEl) {
+    resultEl.style.display = 'none';
   }
 }
 
-// Stubs HTML (la modale Supabase n'existe plus)
+// Stubs HTML
 function openModal(id) { document.getElementById(id)?.classList.remove('hidden'); }
+
+function saveGistConfig() {
+  const token  = document.getElementById('gist-token-input').value.trim();
+  const gistId = document.getElementById('gist-id-input').value.trim();
+  const file   = document.getElementById('gist-file-input').value.trim() || 'ia_platform_data.json';
+
+  if (!token || !gistId) {
+    showToast('⚠ Token et Gist ID sont obligatoires', 'warning');
+    return;
+  }
+
+  localStorage.setItem('gist_token',  token);
+  localStorage.setItem('gist_id',     gistId);
+  localStorage.setItem('gist_file',   file);
+
+  // Effacer les champs pour ne pas exposer le token
+  document.getElementById('gist-token-input').value = '';
+  document.getElementById('gist-id-input').value    = gistId;   // garder l'ID visible
+  document.getElementById('gist-file-input').value  = file;
+
+  showToast('💾 Configuration Gist sauvegardée', 'success');
+  updateSyncUI(false);
+  syncNow(false);
+}
+
+async function testGistConnection() {
+  if (!gistConfigured()) {
+    showToast('⚠ Remplissez Token et Gist ID d\'abord', 'warning');
+    return;
+  }
+  showLoading('Test de connexion Gist...');
+  try {
+    const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
+      headers: GIST_HEADERS
+    });
+    hideLoading();
+    const statusEl = document.getElementById('gist-test-result');
+    if (resp.ok) {
+      const data = await resp.json();
+      const files = Object.keys(data.files || {}).join(', ');
+      if (statusEl) { statusEl.textContent = `✅ Connexion réussie — fichiers : ${files || '(vide)'}`; statusEl.className = 'connection-status success'; }
+      showToast('✅ Gist accessible', 'success');
+    } else if (resp.status === 401) {
+      if (statusEl) { statusEl.textContent = '❌ Token invalide ou expiré (401)'; statusEl.className = 'connection-status error'; }
+      showToast('❌ Token invalide (401)', 'error');
+    } else if (resp.status === 404) {
+      if (statusEl) { statusEl.textContent = '❌ Gist ID introuvable (404)'; statusEl.className = 'connection-status error'; }
+      showToast('❌ Gist ID introuvable (404)', 'error');
+    } else {
+      if (statusEl) { statusEl.textContent = `❌ Erreur HTTP ${resp.status}`; statusEl.className = 'connection-status error'; }
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('❌ Impossible de joindre GitHub : ' + e.message, 'error');
+  }
+}
+
+function clearGistConfig() {
+  if (!confirm('Supprimer la configuration Gist ? L\'app continuera en mode local.')) return;
+  localStorage.removeItem('gist_token');
+  localStorage.removeItem('gist_id');
+  localStorage.removeItem('gist_file');
+  document.getElementById('gist-token-input').value = '';
+  document.getElementById('gist-id-input').value    = '';
+  document.getElementById('gist-file-input').value  = 'ia_platform_data.json';
+  updateSyncUI(false);
+  showToast('🔌 Configuration Gist supprimée', 'warning');
+}
+
+function renderGistSettings() {
+  const idEl   = document.getElementById('gist-id-input');
+  const fileEl = document.getElementById('gist-file-input');
+  if (idEl   && GIST.gistId) idEl.value   = GIST.gistId;
+  if (fileEl && GIST.file)   fileEl.value = GIST.file;
+  // Le token n'est jamais réaffiché pour la sécurité
+}
 
 // ============================================================
 // INIT FINAL : sync Gist au démarrage + RSS auto
