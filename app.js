@@ -2691,7 +2691,7 @@ async function testFeedUrl(id) {
 // GITHUB GIST SYNC — credentials hardcodés
 // ============================================================
 const GIST = {
-  token:  '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',
+  token:  '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',
   gistId: '991049ab379d0dc41a5ae7ee99bffbe9',
   file:   'ia_platform_data.json'
 };
