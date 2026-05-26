@@ -2691,9 +2691,9 @@ async function testFeedUrl(id) {
 // GITHUB GIST SYNC — credentials hardcodés
 // ============================================================
 const GIST = {
-  token:  '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',
+  token:  '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',
   gistId: '991049ab379d0dc41a5ae7ee99bffbe9',
-  file:   'ia-platform-backup.json'
+  file:   'ia_platform_data.json'
 };
 
 const GIST_HEADERS = {
@@ -2707,11 +2707,27 @@ async function gistPull() {
   const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
     headers: GIST_HEADERS
   });
+
+  if (resp.status === 401) throw new Error('Token GitHub invalide ou expiré (401) — vérifiez le scope "gist" sur github.com/settings/tokens');
+  if (resp.status === 403) throw new Error('Accès refusé (403) — token sans permission gist');
+  if (resp.status === 404) throw new Error('Gist introuvable (404) — vérifiez l\'ID du Gist');
   if (!resp.ok) throw new Error(`Gist pull HTTP ${resp.status}`);
+
   const data = await resp.json();
-  const raw  = data.files?.[GIST.file]?.content;
-  if (!raw) return null;                 // Gist vide ou fichier absent
-  return JSON.parse(raw);
+
+  // Cherche le fichier par nom exact, puis par extension .json en fallback
+  let raw = data.files?.[GIST.file]?.content;
+  if (!raw) {
+    // Fallback : prend le premier fichier .json du Gist
+    const jsonFile = Object.values(data.files || {}).find(f => f.filename.endsWith('.json'));
+    if (jsonFile) {
+      raw = jsonFile.content;
+      GIST.file = jsonFile.filename; // met à jour le nom pour le push
+      console.log('Gist: fichier trouvé par fallback :', jsonFile.filename);
+    }
+  }
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch(e) { return null; }
 }
 
 // ── PUSH : écrire le Gist ────────────────────────────────────
@@ -2753,14 +2769,12 @@ function mergeFeeds(local, remote) {
   return local;
 }
 
-// ── Sync complète : pull → merge → push ──────────────────────
 async function syncNow(silent = false) {
   if (!silent) showLoading('Synchronisation Gist...');
   const resultEl = document.getElementById('sync-result');
   if (resultEl) resultEl.style.display = 'none';
 
   try {
-    // Horodater les articles locaux avant merge
     const now = new Date().toISOString();
     state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date || now; });
 
@@ -2775,13 +2789,12 @@ async function syncNow(silent = false) {
       if (Array.isArray(remote.rssFeeds) && remote.rssFeeds.length > 0) {
         state.rssFeeds = mergeFeeds(state.rssFeeds, remote.rssFeeds);
       }
-      // Récupérer la clé Mistral du remote si absente en local
       if (!state.settings.mistralKey && remote.settings?.mistralKey) {
         state.settings.mistralKey = remote.settings.mistralKey;
       }
     }
 
-    // 3. PUSH état mergé (clé Mistral incluse — Gist privé)
+    // 3. PUSH
     await gistPush({
       articles:  state.articles,
       rssFeeds:  state.rssFeeds,
@@ -2790,7 +2803,6 @@ async function syncNow(silent = false) {
     });
 
     state.settings.lastSyncDate = now;
-    // Sauvegarde locale sans déclencher une nouvelle sync
     try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
 
     if (!silent) hideLoading();
@@ -2802,8 +2814,11 @@ async function syncNow(silent = false) {
   } catch(e) {
     if (!silent) hideLoading();
     console.error('Gist sync error:', e);
+    // L'app continue de fonctionner en local même si le Gist échoue
+    renderAllViews();
+    updateStats();
     updateSyncUI(false, e.message);
-    if (!silent) showToast('❌ Erreur sync Gist : ' + e.message, 'error');
+    if (!silent) showToast('⚠ Sync Gist : ' + e.message, 'warning');
   }
 }
 
