@@ -2693,14 +2693,13 @@ async function testFeedUrl(id) {
 const GIST = {
   token:  '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',
   gistId: '991049ab379d0dc41a5ae7ee99bffbe9',
-  file:   'ia_platform_data.json'
+  file:   'ia-platform-backup.json'
 };
 
 const GIST_HEADERS = {
-  'Authorization': `Bearer ${GIST.token}`,
+  'Authorization': `token ${GIST.token}`,
   'Accept':        'application/vnd.github+json',
-  'Content-Type':  'application/json',
-  'X-GitHub-Api-Version': '2022-11-28'
+  'Content-Type':  'application/json'
 };
 
 // ── PULL : lire le Gist ──────────────────────────────────────
