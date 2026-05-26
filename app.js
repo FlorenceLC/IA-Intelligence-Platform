@@ -2688,143 +2688,154 @@ async function testFeedUrl(id) {
 }
 
 // ============================================================
-// SUPABASE SYNC — credentials hardcodés
+// GITHUB GIST SYNC — credentials hardcodés
 // ============================================================
-const sb = {
-  url:    'https://hxfolotdvcefmbvqceom.supabase.co',
-  key:    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh4Zm9sb3RkdmNlZm1idnFjZW9tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMDYwMDIsImV4cCI6MjA5MDc4MjAwMn0.EqOCYvXssghS6HPJwUUGVoAt1gcGLmf2oDdsZbeaH10',
-  userId: 'hxfolotdvcefmbvqceom'
+const GIST = {
+  token:  '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',
+  gistId: '991049ab379d0dc41a5ae7ee99bffbe9',
+  file:   'ia_platform_data.json'
 };
 
-function sbFetch(path, options = {}) {
-  return fetch(`${sb.url}${path}`, {
-    ...options,
-    headers: {
-      'apikey':        sb.key,
-      'Authorization': `Bearer ${sb.key}`,
-      'Content-Type':  'application/json',
-      ...(options.headers || {})
+const GIST_HEADERS = {
+  'Authorization': `Bearer ${GIST.token}`,
+  'Accept':        'application/vnd.github+json',
+  'Content-Type':  'application/json',
+  'X-GitHub-Api-Version': '2022-11-28'
+};
+
+// ── PULL : lire le Gist ──────────────────────────────────────
+async function gistPull() {
+  const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
+    headers: GIST_HEADERS
+  });
+  if (!resp.ok) throw new Error(`Gist pull HTTP ${resp.status}`);
+  const data = await resp.json();
+  const raw  = data.files?.[GIST.file]?.content;
+  if (!raw) return null;                 // Gist vide ou fichier absent
+  return JSON.parse(raw);
+}
+
+// ── PUSH : écrire le Gist ────────────────────────────────────
+async function gistPush(payload) {
+  const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
+    method:  'PATCH',
+    headers: GIST_HEADERS,
+    body: JSON.stringify({
+      files: {
+        [GIST.file]: {
+          content: JSON.stringify(payload, null, 2)
+        }
+      }
+    })
+  });
+  if (!resp.ok) throw new Error(`Gist push HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// ── Merge articles : union par id, timestamp le plus récent gagne ──
+function mergeArticles(local, remote) {
+  const map = new Map(local.map(a => [a.id, a]));
+  remote.forEach(ra => {
+    if (!map.has(ra.id)) {
+      map.set(ra.id, ra);
+    } else {
+      const localTs  = new Date(map.get(ra.id).updatedAt || map.get(ra.id).date || 0).getTime();
+      const remoteTs = new Date(ra.updatedAt || ra.date || 0).getTime();
+      if (remoteTs > localTs) map.set(ra.id, ra);
     }
   });
+  return [...map.values()];
+}
+
+// ── Merge flux RSS ────────────────────────────────────────────
+function mergeFeeds(local, remote) {
+  const ids = new Set(local.map(f => f.id));
+  remote.forEach(rf => { if (!ids.has(rf.id)) local.push(rf); });
+  return local;
 }
 
 // ── Sync complète : pull → merge → push ──────────────────────
 async function syncNow(silent = false) {
-  if (!silent) showLoading('Synchronisation Supabase...');
+  if (!silent) showLoading('Synchronisation Gist...');
   const resultEl = document.getElementById('sync-result');
   if (resultEl) resultEl.style.display = 'none';
 
   try {
-    // 1. PULL depuis Supabase
-    const pullResp = await sbFetch(
-      `/rest/v1/ia_platform?user_id=eq.${encodeURIComponent(sb.userId)}&select=data_type,payload,updated_at`
-    );
-    if (!pullResp.ok) throw new Error(`Pull HTTP ${pullResp.status}`);
-    const remoteRows = await pullResp.json();
-
-    const remoteArticlesRow = remoteRows.find(r => r.data_type === 'articles');
-    const remoteFeedsRow    = remoteRows.find(r => r.data_type === 'rss_feeds');
-
-    // 2. MERGE articles : union par id, le plus récent gagne
-    if (remoteArticlesRow?.payload?.articles?.length) {
-      const remote = remoteArticlesRow.payload.articles;
-      const localMap = new Map(state.articles.map(a => [a.id, a]));
-
-      remote.forEach(ra => {
-        if (!localMap.has(ra.id)) {
-          // Article distant absent en local → on l'ajoute
-          state.articles.push(ra);
-          localMap.set(ra.id, ra);
-        } else {
-          // Même id : le plus récemment modifié gagne
-          const local = localMap.get(ra.id);
-          const remoteTs = new Date(ra.updatedAt || ra.date || 0).getTime();
-          const localTs  = new Date(local.updatedAt || local.date || 0).getTime();
-          if (remoteTs > localTs) {
-            const idx = state.articles.findIndex(a => a.id === ra.id);
-            if (idx !== -1) state.articles[idx] = ra;
-          }
-        }
-      });
-
-      // Articles locaux absents du remote → on les gardera dans le push
-    }
-
-    // 3. MERGE flux RSS
-    if (remoteFeedsRow?.payload?.feeds?.length) {
-      const remoteFeeds = remoteFeedsRow.payload.feeds;
-      const localFeedIds = new Set(state.rssFeeds.map(f => f.id));
-      remoteFeeds.forEach(rf => {
-        if (!localFeedIds.has(rf.id)) state.rssFeeds.push(rf);
-      });
-    }
-
-    // 4. PUSH état local complet vers Supabase (upsert)
+    // Horodater les articles locaux avant merge
     const now = new Date().toISOString();
+    state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date || now; });
 
-    // Ajouter updatedAt sur chaque article pour le prochain merge
-    state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date; });
+    // 1. PULL
+    const remote = await gistPull();
 
-    const upsertData = [
-      {
-        user_id:    sb.userId,
-        data_type:  'articles',
-        payload:    { articles: state.articles },
-        updated_at: now
-      },
-      {
-        user_id:    sb.userId,
-        data_type:  'rss_feeds',
-        payload:    { feeds: state.rssFeeds },
-        updated_at: now
-      },
-      {
-        user_id:    sb.userId,
-        data_type:  'settings',
-        payload:    { settings: { ...state.settings, mistralKey: '' } }, // clé Mistral jamais en cloud
-        updated_at: now
+    // 2. MERGE
+    if (remote) {
+      if (Array.isArray(remote.articles) && remote.articles.length > 0) {
+        state.articles = mergeArticles(state.articles, remote.articles);
       }
-    ];
+      if (Array.isArray(remote.rssFeeds) && remote.rssFeeds.length > 0) {
+        state.rssFeeds = mergeFeeds(state.rssFeeds, remote.rssFeeds);
+      }
+      // Récupérer la clé Mistral du remote si absente en local
+      if (!state.settings.mistralKey && remote.settings?.mistralKey) {
+        state.settings.mistralKey = remote.settings.mistralKey;
+      }
+    }
 
-    const pushResp = await sbFetch('/rest/v1/ia_platform', {
-      method:  'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates' },
-      body:    JSON.stringify(upsertData)
+    // 3. PUSH état mergé (clé Mistral incluse — Gist privé)
+    await gistPush({
+      articles:  state.articles,
+      rssFeeds:  state.rssFeeds,
+      settings:  state.settings,
+      updatedAt: now
     });
-    if (!pushResp.ok) throw new Error(`Push HTTP ${pushResp.status}`);
 
     state.settings.lastSyncDate = now;
-    saveToStorage();
+    // Sauvegarde locale sans déclencher une nouvelle sync
+    try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+
     if (!silent) hideLoading();
     renderAllViews();
     updateStats();
     updateSyncUI(true);
-    if (!silent) showToast('☁ Synchronisation réussie', 'success');
+    if (!silent) showToast('☁ Synchronisation Gist réussie', 'success');
 
   } catch(e) {
     if (!silent) hideLoading();
-    console.error('Sync error:', e);
+    console.error('Gist sync error:', e);
     updateSyncUI(false, e.message);
-    if (!silent) showToast('❌ Erreur de sync : ' + e.message, 'error');
+    if (!silent) showToast('❌ Erreur sync Gist : ' + e.message, 'error');
   }
 }
 
-// ── Appel auto après chaque modification importante ──────────
-function syncAfterChange() {
-  // Debounce : attend 2 s après la dernière modif avant de syncer
-  clearTimeout(syncAfterChange._timer);
-  syncAfterChange._timer = setTimeout(() => syncNow(true), 2000);
+// ── Push direct après suppression (sans debounce) ────────────
+async function _pushToSupabase() {   // gardé pour compatibilité avec deleteArticle
+  const now = new Date().toISOString();
+  state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date || now; });
+  try {
+    await gistPush({
+      articles:  state.articles,
+      rssFeeds:  state.rssFeeds,
+      settings:  state.settings,
+      updatedAt: now
+    });
+    state.settings.lastSyncDate = now;
+    try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+    updateSyncUI(true);
+  } catch(e) {
+    console.error('Gist push error:', e);
+  }
 }
 
-// Surcharge de saveToStorage pour déclencher la sync automatique
-const _origSave = saveToStorage;
-// (on patche après le chargement dans le second DOMContentLoaded)
+// ── Sync différée après chaque modif (debounce 3 s) ──────────
+function syncAfterChange() {
+  clearTimeout(syncAfterChange._timer);
+  syncAfterChange._timer = setTimeout(() => syncNow(true), 3000);
+}
 
+// ── UI sync ──────────────────────────────────────────────────
 function updateSyncUI(success, errMsg) {
   const label      = document.getElementById('sync-status-label');
-  const infoRow    = document.getElementById('sync-info-row');
-  const syncBtn    = document.getElementById('sync-now-btn');
-  const disconnBtn = document.getElementById('disconnect-sync-btn');
   const lastSyncEl = document.getElementById('sb-last-sync');
   const userEl     = document.getElementById('sb-user-display');
   const projectEl  = document.getElementById('sb-project-name');
@@ -2834,40 +2845,34 @@ function updateSyncUI(success, errMsg) {
     label.textContent = success ? '✅ Synchronisé' : '⚠ Erreur';
     label.style.color = success ? 'var(--success)' : 'var(--warning)';
   }
-  if (infoRow)    infoRow.style.display    = '';
-  if (syncBtn)    syncBtn.style.display    = '';
-  if (disconnBtn) disconnBtn.style.display = 'none'; // pas de déconnexion possible (hardcodé)
-  if (lastSyncEl) lastSyncEl.textContent   = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
-  if (userEl)     userEl.textContent       = sb.userId;
-  if (projectEl)  projectEl.textContent    = 'hxfolotdvcefmbvqceom';
+  if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
+  if (userEl)     userEl.textContent     = 'Gist privé';
+  if (projectEl)  projectEl.textContent  = GIST.gistId.substring(0, 12) + '...';
   if (resultEl && errMsg) {
-    resultEl.textContent  = '❌ ' + errMsg;
-    resultEl.className    = 'connection-status error';
+    resultEl.textContent   = '❌ ' + errMsg;
+    resultEl.className     = 'connection-status error';
     resultEl.style.display = 'block';
   }
 }
 
-// Fonctions stub (plus nécessaires mais appelées depuis HTML)
-function saveSupabaseConfig() { showToast('✅ Base de données déjà configurée', 'success'); closeModal('supabase-modal'); }
-function testSupabaseConnection() { syncNow(false); }
-function disconnectSync() { showToast('ℹ Base de données intégrée — non modifiable', 'info'); }
-function generateUserId() {}
+// Stubs HTML (la modale Supabase n'existe plus)
 function openModal(id) { document.getElementById(id)?.classList.remove('hidden'); }
 
 // ============================================================
-// INIT FINAL : sync au démarrage + RSS auto
+// INIT FINAL : sync Gist au démarrage + RSS auto
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
-  // Sync immédiate au démarrage (silent = false pour afficher le résultat)
+  // Sync immédiate au démarrage
   syncNow(false);
 
-  // Patch saveToStorage pour syncer auto après chaque sauvegarde
-  const originalSave = saveToStorage;
+  // Patch saveToStorage → sync auto différée après chaque sauvegarde
+  const _origSave = saveToStorage;
   window.saveToStorage = function() {
-    originalSave();
+    _origSave();
     syncAfterChange();
   };
 
-  // Schedule RSS auto-fetch
+  // Lancer le RSS auto-fetch si activé
   scheduleRssAutoFetch();
 }, { once: true });
+
