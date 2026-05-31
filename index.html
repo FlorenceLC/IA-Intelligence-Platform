@@ -124,29 +124,31 @@
         </div>
       </div>
 
-      <!-- Inoreader -->
+      <!-- Analyse de texte multi-articles -->
       <div class="card import-card">
         <div class="card-header">
-          <h2>Inoreader</h2>
-          <span class="card-tag inoreader">RSS</span>
+          <h2>Analyser un texte</h2>
+          <span class="card-tag" style="background:rgba(240,180,41,0.15);color:var(--gold)">Multi-liens</span>
         </div>
-        <div class="inoreader-section">
-          <div class="inoreader-status" id="inoreader-status">
-            <div class="status-indicator disconnected"></div>
-            <span>Non connecté</span>
-          </div>
+        <div class="import-form">
           <div class="form-group">
-            <label>Token API Inoreader</label>
-            <input type="password" id="inoreader-token" placeholder="Votre token..." class="input-field" />
+            <label>Collez votre texte ici</label>
+            <textarea id="paste-text-input" class="input-field textarea-field" rows="8"
+              placeholder="Collez ici un texte contenant des descriptions et des liens (URLs). Mistral détectera automatiquement les articles liés à l'IA et générera les résumés."></textarea>
           </div>
-          <button class="btn-secondary full-width" onclick="connectInoreader()">Connecter Inoreader</button>
-          <div id="inoreader-feeds" class="feeds-list hidden">
-            <h3>Articles disponibles</h3>
-            <div id="feeds-container"></div>
-            <button class="btn-primary full-width mt-1" onclick="generateAllSummaries()">
-              🔄 Générer les résumés
+          <div class="btn-group">
+            <button class="btn-primary" onclick="analysepastedText()">
+              🔍 Analyser & Résumer
+            </button>
+            <button class="btn-secondary" onclick="document.getElementById('paste-text-input').value=''">
+              Effacer
             </button>
           </div>
+          <div class="import-info">
+            <span>🤖</span>
+            <span>Mistral extrait les liens, filtre ceux liés à l'IA et génère un résumé structuré pour chacun</span>
+          </div>
+          <div id="paste-analysis-result" style="display:none;margin-top:14px"></div>
         </div>
       </div>
 

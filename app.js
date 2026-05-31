@@ -1880,44 +1880,172 @@ function clearAllData() {
 }
 
 // ============ INOREADER ============
-function connectInoreader() {
-  const token = document.getElementById('inoreader-token').value.trim();
-  if (!token) { showToast('⚠ Entrez votre token Inoreader', 'warning'); return; }
-  state.settings.inoreaderToken = token;
-  saveToStorage();
+// ============ ANALYSE TEXTE COLLÉ ============
+async function analysepastedText() {
+  const text = document.getElementById('paste-text-input').value.trim();
+  if (!text) { showToast('⚠ Collez du texte avant d\'analyser', 'warning'); return; }
+  if (!state.settings.mistralKey) { showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning'); return; }
 
-  // Show mock feeds
-  document.getElementById('inoreader-status').innerHTML = `
-    <div class="status-indicator connected"></div>
-    <span>Connecté à Inoreader</span>
-  `;
+  const resultEl = document.getElementById('paste-analysis-result');
+  resultEl.style.display = 'none';
 
-  const feeds = [
-    { title: 'MIT Technology Review — AI', count: 8 },
-    { title: 'The Verge — Tech News', count: 12 },
-    { title: 'AI News — Intelligence artificielle', count: 5 },
-    { title: 'Defense One', count: 3 }
-  ];
+  // 1. Extraire tous les URLs du texte
+  const urlRegex = /https?:\/\/[^\s\)\]\}"'<>]+/g;
+  const foundUrls = [...new Set(text.match(urlRegex) || [])];
 
-  const container = document.getElementById('feeds-container');
-  container.innerHTML = feeds.map(f => `
-    <div class="feed-item">
-      <label>
-        <input type="checkbox" class="feed-checkbox" checked> ${escHtml(f.title)}
-      </label>
-      <span style="font-size:11px;color:var(--text-muted)">${f.count} articles</span>
-    </div>
-  `).join('');
+  if (foundUrls.length === 0) {
+    showToast('⚠ Aucun lien URL trouvé dans le texte', 'warning');
+    return;
+  }
 
-  document.getElementById('inoreader-feeds').classList.remove('hidden');
-  showToast('✅ Inoreader connecté', 'success');
-}
+  showLoading(`Analyse du texte — ${foundUrls.length} lien(s) détecté(s)...`);
 
-async function generateAllSummaries() {
-  showLoading('Génération des résumés en cours...');
-  await new Promise(r => setTimeout(r, 2000));
+  // 2. Demander à Mistral quels liens sont liés à l'IA
+  let aiUrls = [];
+  try {
+    const filterResp = await fetch('https://api.mistral.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.settings.mistralKey}` },
+      body: JSON.stringify({
+        model: 'mistral-large-latest',
+        temperature: 0.1,
+        messages: [
+          {
+            role: 'system',
+            content: `Tu es un expert en veille IA. On te donne un texte avec des liens et descriptions. 
+Tu dois identifier uniquement les liens dont le sujet traite d'intelligence artificielle, machine learning, LLM, robotique, automatisation IA, ou technologies IA.
+RÉPONDS UNIQUEMENT avec un JSON valide : { "ai_urls": ["url1", "url2"] }
+Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
+          },
+          { role: 'user', content: `Texte à analyser :\n\n${text}\n\nLiens détectés :\n${foundUrls.join('\n')}` }
+        ]
+      })
+    });
+    const filterData = await filterResp.json();
+    const filterText = filterData.choices?.[0]?.message?.content || '';
+    const parsed = JSON.parse(filterText.replace(/```json|```/g, '').trim());
+    aiUrls = parsed.ai_urls || [];
+  } catch(e) {
+    // Fallback : filtrer localement par mots-clés si Mistral échoue
+    aiUrls = foundUrls.filter(url => isAiRelated(url + ' ' + text));
+  }
+
+  if (aiUrls.length === 0) {
+    hideLoading();
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `<div class="import-info" style="background:var(--warning-bg);border-color:rgba(251,191,36,0.3)">
+      <span>⚠</span><span>Aucun lien lié à l'IA détecté parmi les ${foundUrls.length} URL(s) trouvé(s).</span>
+    </div>`;
+    return;
+  }
+
+  showLoading(`${aiUrls.length} lien(s) IA détecté(s) — génération des résumés...`);
+
+  // 3. Générer un résumé pour chaque URL IA
+  let done = 0;
+  let added = 0;
+
+  for (const url of aiUrls) {
+    showLoading(`Résumé ${done + 1} / ${aiUrls.length} : ${url.substring(0, 60)}...`);
+    try {
+      // Vérifier doublon URL
+      const existingUrls = new Set(state.articles.map(a => normalizeUrl(a.url)));
+      if (existingUrls.has(normalizeUrl(url))) {
+        showToast(`⚠ Déjà importé : ${url.substring(0, 50)}...`, 'warning');
+        done++;
+        continue;
+      }
+
+      // Récupérer contenu de la page
+      let pageText = '', pageTitle = '', extractedPubDate = null;
+      try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+        const resp = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          const html = data.contents || '';
+          const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+          pageTitle = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
+
+          // Date de publication
+          const dateCandidates = [
+            html.match(/"datePublished"\s*:\s*"([^"]+)"/i)?.[1],
+            html.match(/property=["']article:published_time["'][^>]*content=["']([^"']+)["']/i)?.[1],
+            html.match(/content=["']([^"']+)["'][^>]*property=["']article:published_time["']/i)?.[1],
+            html.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1],
+          ].filter(Boolean);
+          for (const c of dateCandidates) {
+            try { const d = new Date(c); if (!isNaN(d.getTime()) && d.getFullYear() > 2000) { extractedPubDate = d.toISOString(); break; } } catch(e) {}
+          }
+
+          pageText = html.replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ')
+            .replace(/<[^>]+>/g,' ').replace(/\s{3,}/g,' ').trim().substring(0, 4000);
+        }
+      } catch(e) {}
+
+      const now = new Date();
+      const articleData = {
+        id: generateId(), url, title: pageTitle || url, titleFr: '',
+        content: pageText, domain: '', status: 'NEW',
+        date: now.toISOString(), publicationDate: extractedPubDate,
+        week: extractedPubDate ? getWeekNumber(new Date(extractedPubDate)) : getWeekNumber(now),
+        weekYear: extractedPubDate ? getWeekYear(new Date(extractedPubDate)) : getWeekYear(now),
+        month: extractedPubDate
+          ? new Date(extractedPubDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' })
+          : now.toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
+        favorite: false, summary: '', keyPoints: [], fromPaste: true
+      };
+
+      // Générer résumé Mistral
+      const result = await generateSummaryWithMistral(articleData);
+      articleData.titleFr   = result.titleFr   || pageTitle || url;
+      articleData.title     = articleData.titleFr;
+      articleData.summary   = result.summary   || '';
+      articleData.keyPoints = result.keyPoints || [];
+      if (result.domain) articleData.domain = result.domain;
+      if (!articleData.domain) articleData.domain = detectDomain(articleData.titleFr + ' ' + articleData.summary);
+      if (!articleData.publicationDate && result.publicationDate) {
+        try { const d = new Date(result.publicationDate); if (!isNaN(d.getTime()) && d.getFullYear() > 2000) { articleData.publicationDate = d.toISOString(); articleData.week = getWeekNumber(d); articleData.weekYear = getWeekYear(d); } } catch(e) {}
+      }
+
+      // Vérification doublon contenu
+      const dup = findDuplicate(articleData);
+      if (dup) {
+        articleData.status = 'DUPLICATE_SUSPECTED';
+        state.currentDuplicateCheck = { new: articleData, existing: dup.article, score: dup.score };
+      } else {
+        articleData.status = 'PENDING_REVIEW';
+      }
+
+      state.articles.push(articleData);
+      added++;
+      done++;
+      saveToStorage();
+      await new Promise(r => setTimeout(r, 800)); // rate limit Mistral
+
+    } catch(e) {
+      console.warn('Paste article error:', url, e.message);
+      done++;
+    }
+  }
+
   hideLoading();
-  showToast('✅ Résumés générés pour tous les articles sélectionnés', 'success');
+
+  // Afficher résultat
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = `<div class="import-info" style="background:var(--success-bg);border-color:rgba(52,211,153,0.3)">
+    <span>✅</span>
+    <span><strong>${added} article${added > 1 ? 's' : ''} IA ajouté${added > 1 ? 's' : ''}</strong> sur ${foundUrls.length} lien(s) détecté(s) (${aiUrls.length} lié${aiUrls.length > 1 ? 's' : ''} à l'IA). Retrouvez-les dans la file de validation.</span>
+  </div>`;
+
+  renderSavedArticles();
+  renderValidationQueue();
+  updateStats();
+
+  if (added > 0) {
+    showToast(`✅ ${added} article${added > 1 ? 's' : ''} ajouté${added > 1 ? 's' : ''} en validation`, 'success');
+    document.getElementById('paste-text-input').value = '';
+  }
 }
 
 // ============ UTILS ============
