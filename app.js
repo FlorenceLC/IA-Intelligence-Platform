@@ -224,10 +224,11 @@ async function importArticle() {
     // Step 3: Mistral extracts everything
     showLoading('Génération du résumé avec Mistral...');
     const result = await generateSummaryWithMistral(articleData);
-    articleData.titleFr = result.titleFr || pageTitle || 'Article sans titre';
-    articleData.title = articleData.titleFr;
-    articleData.summary = result.summary || '';
+    articleData.titleFr   = result.titleFr   || pageTitle || 'Article sans titre';
+    articleData.title     = articleData.titleFr;
+    articleData.summary   = result.summary   || '';
     articleData.keyPoints = result.keyPoints || [];
+    articleData.defenseTable = result.defenseTable || null;
     if (result.domain) articleData.domain = result.domain;
     if (!articleData.domain) articleData.domain = detectDomain(articleData.titleFr + ' ' + articleData.summary);
 
@@ -301,10 +302,22 @@ Structure JSON obligatoire :
   "summary": "résumé en 1 à 2 phrases claires en français",
   "keyPoints": ["👩🏻‍🚀 point 1", "🦠 point 2", "🪐 point 3"],
   "domain": "un seul parmi : Défense, Civil, Entreprise, Hardware, AI technologie, Robotique, Juridique",
-  "publicationDate": "date de publication de l'article au format ISO 8601 (YYYY-MM-DD) si trouvée dans le contenu, sinon null"
+  "publicationDate": "date de publication au format YYYY-MM-DD si trouvée, sinon null",
+  "defenseTable": null
 }
 Les keyPoints doivent contenir entre 3 et 10 éléments, chacun commençant par un emoji.
-Pour publicationDate : cherche dans le HTML des balises meta (article:published_time, datePublished, pubdate), des mentions de date en texte (ex: "12 janvier 2025", "Jan 12 2025"), ou tout autre indicateur de date dans le contenu.`
+Pour publicationDate : cherche dans le HTML des balises meta (article:published_time, datePublished, pubdate), des mentions de date en texte, ou tout autre indicateur de date.
+IMPORTANT : Si le domaine détecté est "Défense", remplis obligatoirement le champ "defenseTable" avec un tableau JSON (array) d'objets représentant chaque système/produit/technologie mentionné dans l'article :
+[
+  {
+    "fabricant": "nom du fabricant ou organisation",
+    "produit": "nom du produit ou de la technologie",
+    "fonctionIA": "rôle précis de l'IA dans ce produit/système",
+    "statut": "Existant" | "En cours de développement" | "Concept",
+    "anneeSortie": "année prévue ou connue, sinon null"
+  }
+]
+S'il n'y a pas d'article de défense, "defenseTable" reste null.`
         },
         { role: 'user', content: prompt }
       ]
@@ -326,6 +339,10 @@ Pour publicationDate : cherche dans le HTML des balises meta (article:published_
     if (!parsed.summary) parsed.summary = 'Résumé non disponible';
     if (!Array.isArray(parsed.keyPoints) || parsed.keyPoints.length === 0) {
       parsed.keyPoints = ['👩🏻‍🚀 Contenu extrait automatiquement'];
+    }
+    // Valider defenseTable
+    if (parsed.defenseTable && !Array.isArray(parsed.defenseTable)) {
+      parsed.defenseTable = null;
     }
     return parsed;
   } catch(e) {
@@ -801,33 +818,78 @@ function openArticleModal(id) {
 
 function buildArticleDetail(a) {
   const keyPointsHtml = (a.keyPoints && a.keyPoints.length > 0)
-    ? `<ul>${a.keyPoints.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
+    ? `<ul style="margin:8px 0 0 16px">${a.keyPoints.map(p => `<li style="margin-bottom:4px">${escHtml(p)}</li>`).join('')}</ul>`
     : '';
+
+  const dateLabel = a.publicationDate ? formatDate(a.publicationDate) : formatDate(a.date);
+
   const summaryBlock = `
     <div class="summary-block">
       <h3>${escHtml(a.titleFr || a.title)}</h3>
-      ${a.url ? `<p><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a> | <span style="color:var(--text-muted)">${formatDate(a.date)}</span></p><br>` : ''}
-      <p>${escHtml(a.summary || 'Aucun résumé généré')}</p>
-      ${keyPointsHtml ? `<br><strong>Informations importantes :</strong>${keyPointsHtml}` : ''}
-      <br><p><strong>Domaine :</strong> ${DOMAIN_ICONS[a.domain] || ''} ${a.domain || 'Non classé'}</p>
+      ${a.url ? `<p style="margin:6px 0 12px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a> <span style="color:var(--text-muted);font-size:12px">| ${dateLabel}</span></p>` : ''}
+      <p style="line-height:1.7">${escHtml(a.summary || 'Aucun résumé généré')}</p>
+      ${keyPointsHtml ? `<p style="margin-top:12px;font-weight:600;color:var(--text-primary)">Informations importantes :</p>${keyPointsHtml}` : ''}
     </div>
   `;
+
+  // ── Tableau Défense ──
+  let defenseTableHtml = '';
+  if (a.domain === 'Défense' && Array.isArray(a.defenseTable) && a.defenseTable.length > 0) {
+    const rows = a.defenseTable.map(row => {
+      const statutColor = row.statut === 'Existant'
+        ? 'var(--success)' : row.statut === 'En cours de développement'
+        ? 'var(--warning)' : 'var(--accent)';
+      return `<tr>
+        <td>${escHtml(row.fabricant || '—')}</td>
+        <td>${escHtml(row.produit   || '—')}</td>
+        <td>${escHtml(row.fonctionIA || '—')}</td>
+        <td><span style="color:${statutColor};font-weight:600;font-size:12px">${escHtml(row.statut || '—')}</span></td>
+        <td style="text-align:center">${escHtml(row.anneeSortie || '—')}</td>
+      </tr>`;
+    }).join('');
+
+    defenseTableHtml = `
+      <div style="margin-top:20px">
+        <h4 style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--beige);margin-bottom:12px;display:flex;align-items:center;gap:6px">
+          🪖 Systèmes & Technologies identifiés
+        </h4>
+        <div style="overflow-x:auto;border-radius:8px;border:1px solid var(--navy-border)">
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="background:var(--navy)">
+                <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Fabricant / Organisation</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Produit / Technologie</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);border-bottom:1px solid var(--navy-border)">Fonction de l'IA</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Statut</th>
+                <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Année prévue</th>
+              </tr>
+            </thead>
+            <tbody style="color:var(--text-secondary)">
+              ${rows}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  } else if (a.domain === 'Défense' && (!a.defenseTable || a.defenseTable.length === 0)) {
+    defenseTableHtml = `
+      <div style="margin-top:16px;padding:10px 14px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px;font-size:12px;color:var(--text-muted)">
+        🪖 Aucun système spécifique identifié dans cet article
+      </div>
+    `;
+  }
+
   const metaSection = `
     <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
       <span class="domain-badge ${domainClass(a.domain)}">${a.domain}</span>
       <span class="status-badge ${statusClass(a.status)}">${statusLabel(a.status)}</span>
-      <span style="font-size:12px;color:var(--text-muted)">Semaine ${a.week || '?'}</span>
+      <span style="font-size:12px;color:var(--text-muted)">${weekLabel(a)}</span>
       <button class="${a.favorite ? 'btn-warning' : 'btn-secondary'} small" onclick="toggleFavorite('${a.id}');closeModal('article-modal')">${a.favorite ? '⭐ Retirer des favoris' : '☆ Ajouter aux favoris'}</button>
       ${a.status === 'PENDING_REVIEW' ? `<button class="btn-success small" onclick="validateArticle('${a.id}');closeModal('article-modal')">✅ Valider</button>` : ''}
     </div>
   `;
-  const contentSection = a.content ? `
-    <div style="margin-top:16px">
-      <h4 style="font-size:12px;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px">Contenu original</h4>
-      <div style="background:var(--navy);border:1px solid var(--navy-border);border-radius:8px;padding:14px;font-size:12.5px;color:var(--text-secondary);line-height:1.7;max-height:250px;overflow-y:auto">${escHtml(a.content.substring(0, 2000))}${a.content.length > 2000 ? '...' : ''}</div>
-    </div>
-  ` : '';
-  return summaryBlock + metaSection + contentSection;
+
+  return summaryBlock + defenseTableHtml + metaSection;
 }
 
 // ============ VEILLE ============
@@ -2646,10 +2708,11 @@ async function generateRssSummaries(showProgress = false) {
     try {
       if (showProgress) showLoading(`Génération des résumés : ${done} / ${total}...`);
       const result = await generateSummaryWithMistral(article);
-      article.titleFr   = result.titleFr   || article.title;
-      article.title     = article.titleFr;
-      article.summary   = result.summary   || '';
-      article.keyPoints = result.keyPoints || [];
+      article.titleFr      = result.titleFr   || article.title;
+      article.title        = article.titleFr;
+      article.summary      = result.summary   || '';
+      article.keyPoints    = result.keyPoints || [];
+      article.defenseTable = result.defenseTable || null;
       if (result.domain) article.domain = result.domain;
       if (result.publicationDate) {
         try {

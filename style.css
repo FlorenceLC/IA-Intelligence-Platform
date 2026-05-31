@@ -1463,6 +1463,15 @@ body {
 }
 .import-info span:first-child { flex-shrink: 0; font-size: 14px; }
 
+/* ── Defense table in modal ── */
+.summary-block + div table tbody tr {
+  border-bottom: 1px solid rgba(36,52,71,0.5);
+  transition: background var(--transition);
+}
+.summary-block + div table tbody tr:hover { background: rgba(255,255,255,0.025); }
+.summary-block + div table tbody tr:last-child { border-bottom: none; }
+.summary-block + div table tbody td { padding: 10px 12px; vertical-align: top; line-height: 1.5; }
+
 /* ========= RSS TAB ========= */
 .rss-layout {
   display: grid;
