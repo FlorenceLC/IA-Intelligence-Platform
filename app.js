@@ -3060,56 +3060,6 @@ async function syncNow(silent = false) {
     if (!silent) showToast('⚠ Sync Gist : ' + e.message, 'warning');
   }
 }
-  const resultEl = document.getElementById('sync-result');
-  if (resultEl) resultEl.style.display = 'none';
-
-  try {
-    const now = new Date().toISOString();
-    state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date || now; });
-
-    // 1. PULL
-    const remote = await gistPull();
-
-    // 2. MERGE
-    if (remote) {
-      if (Array.isArray(remote.articles) && remote.articles.length > 0) {
-        state.articles = mergeArticles(state.articles, remote.articles);
-      }
-      if (Array.isArray(remote.rssFeeds) && remote.rssFeeds.length > 0) {
-        state.rssFeeds = mergeFeeds(state.rssFeeds, remote.rssFeeds);
-      }
-      if (!state.settings.mistralKey && remote.settings?.mistralKey) {
-        state.settings.mistralKey = remote.settings.mistralKey;
-      }
-    }
-
-    // 3. PUSH
-    await gistPush({
-      articles:  state.articles,
-      rssFeeds:  state.rssFeeds,
-      settings:  state.settings,
-      updatedAt: now
-    });
-
-    state.settings.lastSyncDate = now;
-    try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
-
-    if (!silent) hideLoading();
-    renderAllViews();
-    updateStats();
-    updateSyncUI(true);
-    if (!silent) showToast('☁ Synchronisation Gist réussie', 'success');
-
-  } catch(e) {
-    if (!silent) hideLoading();
-    console.error('Gist sync error:', e);
-    // L'app continue de fonctionner en local même si le Gist échoue
-    renderAllViews();
-    updateStats();
-    updateSyncUI(false, e.message);
-    if (!silent) showToast('⚠ Sync Gist : ' + e.message, 'warning');
-  }
-}
 
 // ── Push direct après suppression (sans debounce) ────────────
 async function _pushToSupabase() {   // gardé pour compatibilité avec deleteArticle
