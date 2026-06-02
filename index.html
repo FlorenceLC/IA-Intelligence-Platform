@@ -560,16 +560,21 @@
       <div class="card full-width">
         <div class="card-header">
           <h2>☁ Synchronisation multi-appareils — GitHub Gist</h2>
-          <span class="badge-label" id="sync-status-label">Non configuré</span>
+          <span class="badge-label" id="sync-status-label">Vérification...</span>
         </div>
         <div class="settings-form">
+
+          <!-- Statut actuel -->
           <div class="sync-status-row" id="sync-info-row">
+            <div class="stat-row"><span>Token</span><strong id="sync-token-status">—</strong></div>
             <div class="stat-row"><span>Gist ID</span><strong id="sb-project-name">—</strong></div>
+            <div class="stat-row"><span>Articles synchronisés</span><strong id="sync-articles-count">—</strong></div>
             <div class="stat-row"><span>Dernière synchro</span><strong id="sb-last-sync">—</strong></div>
           </div>
 
-          <div class="form-group" style="margin-top:14px">
-            <label>Token GitHub <span style="color:var(--text-muted);font-weight:400;text-transform:none">(scope "gist" requis — jamais réaffiché)</span></label>
+          <!-- Formulaire de config -->
+          <div class="form-group" style="margin-top:16px">
+            <label>Token GitHub <span style="color:var(--text-muted);font-weight:400;text-transform:none">(scope "gist" — jamais réaffiché après sauvegarde)</span></label>
             <div class="input-with-toggle">
               <input type="password" id="gist-token-input" class="input-field" placeholder="ghp_..." autocomplete="off" />
               <button class="btn-icon" onclick="toggleVisibility('gist-token-input')" title="Afficher/masquer">👁</button>
@@ -579,26 +584,36 @@
           <div class="form-group">
             <label>Gist ID</label>
             <input type="text" id="gist-id-input" class="input-field" placeholder="ex: 991049ab379d0dc41a5ae7ee99bffbe9" />
-            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">L'ID se trouve dans l'URL de votre Gist : gist.github.com/vous/<strong>ID</strong></p>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">
+              L'ID est dans l'URL de votre Gist : gist.github.com/vous/<strong>ID</strong>
+            </p>
           </div>
 
           <div class="form-group">
-            <label>Nom du fichier <span style="color:var(--text-muted);font-weight:400;text-transform:none">(optionnel)</span></label>
+            <label>Nom du fichier <span style="color:var(--text-muted);font-weight:400;text-transform:none">(laisser par défaut)</span></label>
             <input type="text" id="gist-file-input" class="input-field" placeholder="ia_platform_data.json" value="ia_platform_data.json" />
           </div>
 
           <div class="btn-group" style="flex-wrap:wrap">
             <button class="btn-primary" onclick="saveGistConfig()">💾 Sauvegarder</button>
-            <button class="btn-secondary" onclick="testGistConnection()">🔌 Tester</button>
+            <button class="btn-secondary" onclick="testGistConnection()">🔌 Tester la connexion</button>
             <button class="btn-secondary" id="sync-now-btn" onclick="syncNow(false)">🔄 Synchroniser</button>
             <button class="btn-danger small" onclick="clearGistConfig()">✕ Effacer</button>
           </div>
-          <div id="gist-test-result" class="connection-status"></div>
-          <div id="sync-result" class="connection-status"></div>
+
+          <div id="gist-test-result" class="connection-status" style="margin-top:10px"></div>
+          <div id="sync-result"      class="connection-status" style="margin-top:6px"></div>
 
           <div class="import-info" style="margin-top:14px">
-            <span>ℹ</span>
-            <span>Créez un token sur <a href="https://github.com/settings/tokens" target="_blank" style="color:var(--accent)">github.com/settings/tokens</a> → "Generate new token (classic)" → cochez uniquement <strong>gist</strong> → choisissez "No expiration".</span>
+            <span>💡</span>
+            <div>
+              <strong>Comment créer un token :</strong><br>
+              1. <a href="https://github.com/settings/tokens" target="_blank" style="color:var(--accent)">github.com/settings/tokens</a> → "Generate new token (classic)"<br>
+              2. Cochez uniquement <strong>gist</strong><br>
+              3. Choisissez <strong>"No expiration"</strong><br>
+              4. Copiez le token → collez-le ci-dessus → Sauvegarder<br>
+              <span style="color:var(--warning)">⚠ Le token doit appartenir au même compte GitHub que le Gist.</span>
+            </div>
           </div>
         </div>
       </div>

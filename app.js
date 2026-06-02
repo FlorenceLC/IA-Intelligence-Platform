@@ -2967,12 +2967,82 @@ function mergeFeeds(local, remote) {
 
 async function syncNow(silent = false) {
   if (!gistConfigured()) {
-    if (!silent) showToast('⚠ Configurez le Gist dans Paramètres', 'warning');
+    if (!silent) {
+      showToast('⚠ Configurez le Gist dans Paramètres', 'warning');
+      updateSyncUI(false, 'Token et Gist ID non configurés — allez dans Paramètres');
+    }
     renderAllViews();
     updateStats();
     return;
   }
   if (!silent) showLoading('Synchronisation Gist...');
+
+  const resultEl = document.getElementById('sync-result');
+  if (resultEl) resultEl.style.display = 'none';
+
+  console.log('[SYNC] Démarrage — token:', GIST.token.substring(0,10)+'...', 'gistId:', GIST.gistId);
+
+  try {
+    const now = new Date().toISOString();
+    state.articles.forEach(a => { if (!a.updatedAt) a.updatedAt = a.date || now; });
+
+    // 1. PULL
+    console.log('[SYNC] Pull depuis Gist...');
+    const remote = await gistPull();
+    console.log('[SYNC] Pull OK — articles distants:', remote?.articles?.length ?? 0, '| feeds:', remote?.rssFeeds?.length ?? 0);
+
+    // 2. MERGE
+    const localCount = state.articles.length;
+    const localFeedsCount = state.rssFeeds.length;
+
+    if (remote) {
+      if (Array.isArray(remote.articles) && remote.articles.length > 0) {
+        state.articles = mergeArticles(state.articles, remote.articles);
+      }
+      if (Array.isArray(remote.rssFeeds) && remote.rssFeeds.length > 0) {
+        state.rssFeeds = mergeFeeds(state.rssFeeds, remote.rssFeeds);
+      }
+      if (!state.settings.mistralKey && remote.settings?.mistralKey) {
+        state.settings.mistralKey = remote.settings.mistralKey;
+      }
+    }
+
+    const addedArticles = state.articles.length - localCount;
+    const addedFeeds    = state.rssFeeds.length - localFeedsCount;
+    console.log('[SYNC] Merge OK — +articles:', addedArticles, '| +feeds:', addedFeeds);
+
+    // 3. PUSH
+    console.log('[SYNC] Push vers Gist...');
+    await gistPush({
+      articles:  state.articles,
+      rssFeeds:  state.rssFeeds,
+      settings:  state.settings,
+      updatedAt: now
+    });
+    console.log('[SYNC] Push OK');
+
+    state.settings.lastSyncDate = now;
+    try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+
+    if (!silent) hideLoading();
+    renderAllViews();
+    updateStats();
+    updateSyncUI(true);
+
+    const msg = addedArticles > 0 || addedFeeds > 0
+      ? `☁ Sync OK — +${addedArticles} article(s), +${addedFeeds} flux RSS`
+      : '☁ Synchronisation Gist réussie';
+    if (!silent) showToast(msg, 'success');
+
+  } catch(e) {
+    if (!silent) hideLoading();
+    console.error('[SYNC] Erreur:', e.message);
+    renderAllViews();
+    updateStats();
+    updateSyncUI(false, e.message);
+    if (!silent) showToast('⚠ Sync Gist : ' + e.message, 'warning');
+  }
+}
   const resultEl = document.getElementById('sync-result');
   if (resultEl) resultEl.style.display = 'none';
 
@@ -3055,22 +3125,53 @@ function updateSyncUI(success, errMsg) {
   const lastSyncEl = document.getElementById('sb-last-sync');
   const gistIdEl   = document.getElementById('sb-project-name');
   const resultEl   = document.getElementById('sync-result');
+  const infoRow    = document.getElementById('sync-info-row');
 
   const configured = gistConfigured();
 
   if (label) {
-    if (!configured) { label.textContent = 'Non configuré'; label.style.color = 'var(--text-muted)'; }
-    else if (success) { label.textContent = '✅ Synchronisé'; label.style.color = 'var(--success)'; }
-    else { label.textContent = '⚠ Erreur'; label.style.color = 'var(--warning)'; }
+    if (!configured) {
+      label.textContent = '⚠ Non configuré';
+      label.style.color = 'var(--warning)';
+    } else if (success) {
+      label.textContent = '✅ Synchronisé';
+      label.style.color = 'var(--success)';
+    } else {
+      label.textContent = '❌ Erreur';
+      label.style.color = 'var(--danger)';
+    }
   }
-  if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—';
-  if (gistIdEl)   gistIdEl.textContent   = GIST.gistId ? GIST.gistId.substring(0, 14) + '...' : '—';
-  if (resultEl && errMsg) {
-    resultEl.textContent   = '❌ ' + errMsg;
-    resultEl.className     = 'connection-status error';
-    resultEl.style.display = 'block';
-  } else if (resultEl) {
-    resultEl.style.display = 'none';
+
+  if (infoRow) {
+    // Mettre à jour les infos de config visibles
+    const tokenStatusEl = document.getElementById('sync-token-status');
+    if (tokenStatusEl) {
+      tokenStatusEl.textContent = configured
+        ? '✅ Token configuré (' + GIST.token.substring(0,8) + '...)'
+        : '❌ Token manquant';
+      tokenStatusEl.style.color = configured ? 'var(--success)' : 'var(--danger)';
+    }
+  }
+
+  if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate
+    ? formatDate(state.settings.lastSyncDate)
+    : 'Jamais';
+  if (gistIdEl) gistIdEl.textContent = GIST.gistId
+    ? GIST.gistId.substring(0, 16) + '...'
+    : '—';
+
+  if (resultEl) {
+    if (errMsg) {
+      resultEl.innerHTML  = `❌ ${escHtml(errMsg)}<br><small style="color:var(--text-muted)">Vérifiez le token et le Gist ID dans les champs ci-dessus puis cliquez Sauvegarder.</small>`;
+      resultEl.className  = 'connection-status error';
+      resultEl.style.display = 'block';
+    } else if (success) {
+      resultEl.textContent   = `✅ Dernière sync : ${state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—'} — ${state.articles.length} articles, ${state.rssFeeds.length} flux RSS`;
+      resultEl.className     = 'connection-status success';
+      resultEl.style.display = 'block';
+    } else {
+      resultEl.style.display = 'none';
+    }
   }
 }
 
@@ -3148,9 +3249,14 @@ function clearGistConfig() {
 function renderGistSettings() {
   const idEl   = document.getElementById('gist-id-input');
   const fileEl = document.getElementById('gist-file-input');
+  const countEl = document.getElementById('sync-articles-count');
+
+  // Pré-remplir l'ID et le nom de fichier (jamais le token)
   if (idEl   && GIST.gistId) idEl.value   = GIST.gistId;
-  if (fileEl && GIST.file)   fileEl.value = GIST.file;
-  // Le token n'est jamais réaffiché pour la sécurité
+  if (fileEl)                fileEl.value = GIST.file || 'ia_platform_data.json';
+  if (countEl) countEl.textContent = `${state.articles.length} articles, ${state.rssFeeds.length} flux RSS`;
+
+  updateSyncUI(gistConfigured() && !!state.settings.lastSyncDate);
 }
 
 // ============================================================
