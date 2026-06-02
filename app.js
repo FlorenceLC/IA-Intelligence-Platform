@@ -45,7 +45,6 @@ document.addEventListener('DOMContentLoaded', () => {
   loadFromStorage();
   initNavigation();
 
-  // Articles démo uniquement au tout premier lancement
   if (state.articles.length === 0 && !localStorage.getItem('ia_platform_initialized')) {
     injectDemoData();
     localStorage.setItem('ia_platform_initialized', '1');
@@ -55,11 +54,13 @@ document.addEventListener('DOMContentLoaded', () => {
   updateStats();
   updateConnectionStatus();
 
-  // Sync Gist au démarrage (silencieuse si non configuré)
-  syncNow(false);
-
   // RSS auto-fetch si activé
   scheduleRssAutoFetch();
+
+  // Sync Gist en arrière-plan APRES que l'UI est prête, uniquement si configuré
+  if (gistConfigured()) {
+    setTimeout(() => syncNow(true), 1500);
+  }
 });
 
 function loadFromStorage() {
@@ -3137,57 +3138,42 @@ function syncAfterChange() {
 
 // ── UI sync ──────────────────────────────────────────────────
 function updateSyncUI(success, errMsg) {
-  const label      = document.getElementById('sync-status-label');
-  const lastSyncEl = document.getElementById('sb-last-sync');
-  const gistIdEl   = document.getElementById('sb-project-name');
-  const resultEl   = document.getElementById('sync-result');
-  const infoRow    = document.getElementById('sync-info-row');
+  try {
+    const label      = document.getElementById('sync-status-label');
+    const lastSyncEl = document.getElementById('sb-last-sync');
+    const gistIdEl   = document.getElementById('sb-project-name');
+    const resultEl   = document.getElementById('sync-result');
+    const tokenEl    = document.getElementById('sync-token-status');
+    const countEl    = document.getElementById('sync-articles-count');
 
-  const configured = gistConfigured();
+    const configured = gistConfigured();
 
-  if (label) {
-    if (!configured) {
-      label.textContent = '⚠ Non configuré';
-      label.style.color = 'var(--warning)';
-    } else if (success) {
-      label.textContent = '✅ Synchronisé';
-      label.style.color = 'var(--success)';
-    } else {
-      label.textContent = '❌ Erreur';
-      label.style.color = 'var(--danger)';
+    if (label) {
+      if (!configured)   { label.textContent = '⚠ Non configuré'; label.style.color = 'var(--warning)'; }
+      else if (success)  { label.textContent = '✅ Synchronisé';   label.style.color = 'var(--success)'; }
+      else               { label.textContent = '❌ Erreur';        label.style.color = 'var(--danger)';  }
     }
-  }
+    if (tokenEl)   tokenEl.textContent   = configured ? '✅ Token configuré (' + GIST.token.substring(0,8) + '...)' : '❌ Token manquant';
+    if (lastSyncEl) lastSyncEl.textContent = state.settings?.lastSyncDate ? formatDate(state.settings.lastSyncDate) : 'Jamais';
+    if (gistIdEl)  gistIdEl.textContent  = GIST.gistId ? GIST.gistId.substring(0, 16) + '...' : '—';
+    if (countEl)   countEl.textContent   = `${state.articles.length} articles, ${state.rssFeeds.length} flux RSS`;
 
-  if (infoRow) {
-    // Mettre à jour les infos de config visibles
-    const tokenStatusEl = document.getElementById('sync-token-status');
-    if (tokenStatusEl) {
-      tokenStatusEl.textContent = configured
-        ? '✅ Token configuré (' + GIST.token.substring(0,8) + '...)'
-        : '❌ Token manquant';
-      tokenStatusEl.style.color = configured ? 'var(--success)' : 'var(--danger)';
+    if (resultEl) {
+      if (errMsg) {
+        resultEl.innerHTML    = `❌ ${escHtml(errMsg)}<br><small style="color:var(--text-muted)">Vérifiez le token et le Gist ID puis cliquez Sauvegarder.</small>`;
+        resultEl.className    = 'connection-status error';
+        resultEl.style.display = 'block';
+      } else if (success) {
+        resultEl.textContent   = `✅ ${state.articles.length} articles synchronisés`;
+        resultEl.className     = 'connection-status success';
+        resultEl.style.display = 'block';
+      } else {
+        resultEl.style.display = 'none';
+      }
     }
-  }
-
-  if (lastSyncEl) lastSyncEl.textContent = state.settings.lastSyncDate
-    ? formatDate(state.settings.lastSyncDate)
-    : 'Jamais';
-  if (gistIdEl) gistIdEl.textContent = GIST.gistId
-    ? GIST.gistId.substring(0, 16) + '...'
-    : '—';
-
-  if (resultEl) {
-    if (errMsg) {
-      resultEl.innerHTML  = `❌ ${escHtml(errMsg)}<br><small style="color:var(--text-muted)">Vérifiez le token et le Gist ID dans les champs ci-dessus puis cliquez Sauvegarder.</small>`;
-      resultEl.className  = 'connection-status error';
-      resultEl.style.display = 'block';
-    } else if (success) {
-      resultEl.textContent   = `✅ Dernière sync : ${state.settings.lastSyncDate ? formatDate(state.settings.lastSyncDate) : '—'} — ${state.articles.length} articles, ${state.rssFeeds.length} flux RSS`;
-      resultEl.className     = 'connection-status success';
-      resultEl.style.display = 'block';
-    } else {
-      resultEl.style.display = 'none';
-    }
+  } catch(e) {
+    // Ne jamais planter l'app à cause de l'UI de sync
+    console.warn('updateSyncUI error:', e.message);
   }
 }
 
