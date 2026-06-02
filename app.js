@@ -45,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadFromStorage();
   initNavigation();
 
-  // Inject demo articles only on very first launch (storage completely empty)
+  // Articles démo uniquement au tout premier lancement
   if (state.articles.length === 0 && !localStorage.getItem('ia_platform_initialized')) {
     injectDemoData();
     localStorage.setItem('ia_platform_initialized', '1');
@@ -54,6 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
   renderAllViews();
   updateStats();
   updateConnectionStatus();
+
+  // Sync Gist au démarrage (silencieuse si non configuré)
+  syncNow(false);
+
+  // RSS auto-fetch si activé
+  scheduleRssAutoFetch();
 });
 
 function loadFromStorage() {
@@ -73,6 +79,13 @@ function saveToStorage() {
   try {
     localStorage.setItem('ia_platform_data', JSON.stringify(state));
   } catch(e) {}
+  // Sync Gist différée 3s après chaque sauvegarde
+  if (gistConfigured()) syncAfterChange();
+}
+
+function syncAfterChange() {
+  clearTimeout(syncAfterChange._timer);
+  syncAfterChange._timer = setTimeout(() => syncNow(true), 3000);
 }
 
 // ============ NAVIGATION ============
@@ -2892,16 +2905,19 @@ function gistConfigured() {
   return !!(GIST.token && GIST.gistId);
 }
 
-const GIST_HEADERS = {
-  'Authorization': `token ${GIST.token}`,
-  'Accept':        'application/vnd.github+json',
-  'Content-Type':  'application/json'
-};
+// Headers calculés dynamiquement à chaque appel (token lu depuis localStorage)
+function gistHeaders() {
+  return {
+    'Authorization': `token ${GIST.token}`,
+    'Accept':        'application/vnd.github+json',
+    'Content-Type':  'application/json'
+  };
+}
 
 // ── PULL : lire le Gist ──────────────────────────────────────
 async function gistPull() {
   const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
-    headers: GIST_HEADERS
+    headers: gistHeaders()
   });
 
   if (resp.status === 401) throw new Error('Token GitHub invalide ou expiré (401) — vérifiez le scope "gist" sur github.com/settings/tokens');
@@ -2930,7 +2946,7 @@ async function gistPull() {
 async function gistPush(payload) {
   const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
     method:  'PATCH',
-    headers: GIST_HEADERS,
+    headers: gistHeaders(),
     body: JSON.stringify({
       files: {
         [GIST.file]: {
@@ -3210,7 +3226,7 @@ async function testGistConnection() {
   showLoading('Test de connexion Gist...');
   try {
     const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
-      headers: GIST_HEADERS
+      headers: gistHeaders()
     });
     hideLoading();
     const statusEl = document.getElementById('gist-test-result');
@@ -3247,33 +3263,12 @@ function clearGistConfig() {
 }
 
 function renderGistSettings() {
-  const idEl   = document.getElementById('gist-id-input');
-  const fileEl = document.getElementById('gist-file-input');
+  const idEl    = document.getElementById('gist-id-input');
+  const fileEl  = document.getElementById('gist-file-input');
   const countEl = document.getElementById('sync-articles-count');
-
-  // Pré-remplir l'ID et le nom de fichier (jamais le token)
   if (idEl   && GIST.gistId) idEl.value   = GIST.gistId;
   if (fileEl)                fileEl.value = GIST.file || 'ia_platform_data.json';
   if (countEl) countEl.textContent = `${state.articles.length} articles, ${state.rssFeeds.length} flux RSS`;
-
   updateSyncUI(gistConfigured() && !!state.settings.lastSyncDate);
 }
-
-// ============================================================
-// INIT FINAL : sync Gist au démarrage + RSS auto
-// ============================================================
-document.addEventListener('DOMContentLoaded', () => {
-  // Sync immédiate au démarrage
-  syncNow(false);
-
-  // Patch saveToStorage → sync auto différée après chaque sauvegarde
-  const _origSave = saveToStorage;
-  window.saveToStorage = function() {
-    _origSave();
-    syncAfterChange();
-  };
-
-  // Lancer le RSS auto-fetch si activé
-  scheduleRssAutoFetch();
-}, { once: true });
 
