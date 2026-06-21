@@ -246,7 +246,7 @@
         </div>
         <div class="modal-footer">
           <button class="btn-success" onclick="validateAsNew()">✅ Valider comme nouvel article</button>
-          <button class="btn-warning" onclick="mergeArticles()">🔁 Fusionner</button>
+          <button class="btn-warning" onclick="mergeDuplicateArticles()">🔁 Fusionner</button>
           <button class="btn-danger" onclick="rejectArticle()">❌ Rejeter</button>
           <button class="btn-secondary" onclick="editArticle()">✏ Modifier</button>
         </div>
@@ -257,29 +257,6 @@
   <!-- TAB: VEILLE -->
   <section class="tab-content" id="tab-veille">
     <div class="veille-layout">
-
-      <!-- Tableau Concurrence IA (Défense) -->
-      <div class="card full-width" id="defense-table-section" style="display:none">
-        <div class="card-header">
-          <h2>🪖 Concurrence IA — Domaine Défense</h2>
-          <button class="btn-secondary small" onclick="addDefenseRow()">+ Ajouter ligne</button>
-        </div>
-        <div class="table-wrapper">
-          <table class="defense-table" id="defense-table">
-            <thead>
-              <tr>
-                <th>Statut</th>
-                <th>Fabricant</th>
-                <th>Produit</th>
-                <th>Rôle de l'IA</th>
-                <th>Source</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="defense-tbody"></tbody>
-          </table>
-        </div>
-      </div>
 
       <!-- Articles à la une dans veille -->
       <div class="card full-width veille-featured">

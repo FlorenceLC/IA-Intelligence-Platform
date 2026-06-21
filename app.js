@@ -316,22 +316,10 @@ Structure JSON obligatoire :
   "summary": "résumé en 1 à 2 phrases claires en français",
   "keyPoints": ["👩🏻‍🚀 point 1", "🦠 point 2", "🪐 point 3"],
   "domain": "un seul parmi : Défense, Civil, Entreprise, Hardware, AI technologie, Robotique, Juridique",
-  "publicationDate": "date de publication au format YYYY-MM-DD si trouvée, sinon null",
-  "defenseTable": null
+  "publicationDate": "date de publication au format YYYY-MM-DD UNIQUEMENT si elle est explicitement écrite dans le contenu fourni, sinon null"
 }
 Les keyPoints doivent contenir entre 3 et 10 éléments, chacun commençant par un emoji.
-Pour publicationDate : cherche dans le HTML des balises meta (article:published_time, datePublished, pubdate), des mentions de date en texte, ou tout autre indicateur de date.
-IMPORTANT : Si le domaine détecté est "Défense", remplis obligatoirement le champ "defenseTable" avec un tableau JSON (array) d'objets représentant chaque système/produit/technologie mentionné dans l'article :
-[
-  {
-    "fabricant": "nom du fabricant ou organisation",
-    "produit": "nom du produit ou de la technologie",
-    "fonctionIA": "rôle précis de l'IA dans ce produit/système",
-    "statut": "Existant" | "En cours de développement" | "Concept",
-    "anneeSortie": "année prévue ou connue, sinon null"
-  }
-]
-S'il n'y a pas d'article de défense, "defenseTable" reste null.`
+RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme "12 janvier 2025"). Si aucune date explicite n'est trouvée dans le contenu fourni, tu DOIS répondre null — ne propose jamais la date du jour ni une date approximative basée sur le contexte.`
         },
         { role: 'user', content: prompt }
       ]
@@ -346,21 +334,17 @@ S'il n'y a pas d'article de défense, "defenseTable" reste null.`
   const data = await response.json();
   const text = data.choices?.[0]?.message?.content || '';
 
+  let parsed;
   try {
     const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    parsed = JSON.parse(clean);
     if (!parsed.titleFr) parsed.titleFr = article.title || 'Article sans titre';
     if (!parsed.summary) parsed.summary = 'Résumé non disponible';
     if (!Array.isArray(parsed.keyPoints) || parsed.keyPoints.length === 0) {
       parsed.keyPoints = ['👩🏻‍🚀 Contenu extrait automatiquement'];
     }
-    // Valider defenseTable
-    if (parsed.defenseTable && !Array.isArray(parsed.defenseTable)) {
-      parsed.defenseTable = null;
-    }
-    return parsed;
   } catch(e) {
-    return {
+    parsed = {
       titleFr: article.title || 'Article sans titre',
       summary: text.substring(0, 300) || 'Résumé non disponible',
       keyPoints: ['👩🏻‍🚀 Résumé généré depuis l\'URL'],
@@ -368,6 +352,93 @@ S'il n'y a pas d'article de défense, "defenseTable" reste null.`
       publicationDate: null
     };
   }
+
+  // ── Extraction dédiée du tableau IA militaire si domaine = Défense ──
+  parsed.defenseTable = null;
+  const effectiveDomain = parsed.domain || article.domain;
+  if (effectiveDomain === 'Défense') {
+    try {
+      parsed.defenseTable = await extractDefenseTable(article);
+    } catch(e) {
+      console.warn('Extraction tableau Défense échouée:', e.message);
+    }
+  }
+
+  return parsed;
+}
+
+// ── Appel Mistral dédié, focalisé uniquement sur l'extraction du tableau IA militaire ──
+async function extractDefenseTable(article) {
+  const content = article.content
+    ? article.content.substring(0, 4000)
+    : `Titre : ${article.title}\nURL : ${article.url}`;
+
+  const userPrompt = `Titre : ${article.title}\n\nContenu :\n${content}`;
+
+  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${state.settings.mistralKey}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-large-latest',
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content: `Tu es un assistant spécialisé en veille documentaire sur l'intelligence artificielle. Tu analyses des articles pour identifier s'ils parlent d'un produit, système ou technologie intégrant de l'IA.
+
+Tâche :
+À partir du texte fourni, tu dois :
+
+1. Déterminer si le document parle d'intelligence artificielle appliquée à un produit, système ou technologie concret.
+   - Si non, réponds UNIQUEMENT avec ce JSON : {"hasAI": false, "items": []}
+
+2. Si oui, extrais TOUTES les informations suivantes pour CHAQUE produit/système/technologie IA mentionné (une entrée par produit) :
+   - fabricant : nom du fabricant ou de l'organisation
+   - produit : nom du produit ou de la technologie
+   - fonctionIA : la fonction de l'IA décrite en UNE phrase précise
+   - anneeSortie : année à partir de laquelle le produit sera/est livré, SI mentionnée explicitement dans le texte. Ce n'est PAS forcément l'année de publication de l'article. Si non mentionnée : "non précisé"
+   - statut : un seul parmi "Existant" (commercialisé ou déjà utilisé), "En cours de développement" (annoncé ou en phase de test), "Concept" (idée, prototype ou vision non confirmée comme en développement)
+   - categorie : un seul parmi "C4I" (système intégré de commandement/contrôle/communication/renseignement en temps réel), "Fonctions" (l'IA ajoute une fonctionnalité à un système sans en être le cœur — amélioration, assistance, automatisation partielle), "Système d'armes" (plateforme ou système militaire utilisant l'IA pour des fonctions opérationnelles, de ciblage, de décision ou d'autonomie)
+
+Règles strictes :
+- Si une information n'est pas disponible dans le texte, indique "non précisé" (jamais null, jamais inventé)
+- S'il y a plusieurs produits IA mentionnés, crée une entrée par produit
+- Tout doit être rédigé entièrement en français
+- Ne JAMAIS inventer un fabricant, un produit ou une année qui n'est pas dans le texte
+
+RÉPONDS UNIQUEMENT avec un JSON valide, sans markdown, sans backticks :
+{"hasAI": true, "items": [{"fabricant": "...", "produit": "...", "fonctionIA": "...", "anneeSortie": "...", "statut": "...", "categorie": "..."}]}
+ou
+{"hasAI": false, "items": []}`
+        },
+        { role: 'user', content: userPrompt }
+      ]
+    })
+  });
+
+  if (!response.ok) throw new Error(`Mistral API ${response.status}`);
+
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  const clean = text.replace(/```json|```/g, '').trim();
+  const result = JSON.parse(clean);
+
+  if (!result.hasAI || !Array.isArray(result.items) || result.items.length === 0) {
+    return [];
+  }
+
+  // Normaliser les champs pour l'affichage existant
+  return result.items.map(item => ({
+    fabricant:   item.fabricant   || 'non précisé',
+    produit:     item.produit     || 'non précisé',
+    fonctionIA:  item.fonctionIA  || 'non précisé',
+    anneeSortie: item.anneeSortie || 'non précisé',
+    statut:      item.statut      || 'non précisé',
+    categorie:   item.categorie   || 'non précisé'
+  }));
 }
 
 function buildSummaryPrompt(article) {
@@ -499,7 +570,7 @@ function renderValidationQueue() {
         <div class="validation-meta">
           <span class="domain-badge ${domainClass(article.domain)}">${DOMAIN_ICONS[article.domain] || ''} ${article.domain}</span>
           <span class="status-badge ${statusClass(article.status)}">${statusLabel(article.status)}</span>
-          <span>${formatDate(article.publicationDate || article.date)}</span>
+          <span style="${article.publicationDate ? '' : 'color:var(--warning)'}">${publicationDateLabel(article)}</span>
           ${article.status === 'DUPLICATE_SUSPECTED' ? `<span style="color:var(--warning)">⚠ Doublon</span>` : ''}
         </div>
       </div>
@@ -565,8 +636,6 @@ function deleteArticleFromVeille(id) {
   const title = (article.titleFr || article.title || '').substring(0, 50);
   if (!confirm(`Supprimer définitivement :\n« ${title} » ?`)) return;
   state.articles = state.articles.filter(a => a.id !== id);
-  // Also remove from defense table if present
-  defenseRows = defenseRows.filter(r => r.sourceId !== id);
   saveToStorage();
   renderVeille();
   renderSavedArticles();
@@ -615,12 +684,12 @@ function findDuplicateForExisting(article) {
 function showDuplicateModal(newArticle, existingArticle, score) {
   document.getElementById('current-article-preview').innerHTML = `
     <strong>${escHtml(newArticle.titleFr || newArticle.title)}</strong><br>
-    <small style="color:var(--text-muted)">${formatDate(newArticle.date)}</small><br><br>
+    <small style="color:${newArticle.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${publicationDateLabel(newArticle)}</small><br><br>
     ${escHtml((newArticle.summary || '').substring(0, 200))}
   `;
   document.getElementById('suspect-article-preview').innerHTML = `
     <strong>${escHtml(existingArticle.titleFr || existingArticle.title)}</strong><br>
-    <small style="color:var(--text-muted)">${formatDate(existingArticle.date)}</small><br><br>
+    <small style="color:${existingArticle.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${publicationDateLabel(existingArticle)}</small><br><br>
     ${escHtml((existingArticle.summary || '').substring(0, 200))}
   `;
   document.getElementById('similarity-score').textContent = score + '%';
@@ -642,26 +711,34 @@ function validateAsNew() {
   showToast('✅ Article conservé comme nouveau', 'success');
 }
 
-function mergeArticles() {
+function mergeDuplicateArticles() {
   if (!state.currentDuplicateCheck) return;
   const { new: newA, existing } = state.currentDuplicateCheck;
-  // Merge key points
+  // Fusionne points clés (dédupliqués) et résumé
+  const combinedPoints = [...(existing.keyPoints || []), ...(newA.keyPoints || [])];
+  const uniquePoints = [...new Set(combinedPoints)].slice(0, 10);
+
   const merged = {
     ...existing,
-    keyPoints: [...(existing.keyPoints || []), ...(newA.keyPoints || [])].slice(0, 10),
-    summary: (existing.summary || '') + '\n\n[Fusionné] ' + (newA.summary || ''),
-    status: 'MERGED'
+    keyPoints: uniquePoints,
+    summary: existing.summary || newA.summary || '',
+    // Conserver la date de publication la plus fiable (non vide en priorité)
+    publicationDate: existing.publicationDate || newA.publicationDate || null,
+    status: 'VALIDATED',
+    updatedAt: new Date().toISOString()
   };
   const idx = state.articles.findIndex(a => a.id === existing.id);
   if (idx !== -1) state.articles[idx] = merged;
-  // Remove the new duplicate
+  // Supprimer le doublon nouvellement ajouté
   state.articles = state.articles.filter(a => a.id !== newA.id);
   state.currentDuplicateCheck = null;
   saveToStorage();
   closeModal('duplicate-modal');
   renderSavedArticles();
   renderValidationQueue();
-  showToast('🔁 Articles fusionnés', 'success');
+  renderVeilleIfActive();
+  updateStats();
+  showToast('🔁 Articles fusionnés avec succès', 'success');
 }
 
 function rejectArticle() {
@@ -746,9 +823,7 @@ function renderSavedArticles(page = 0) {
 
 function renderArticleCard(a) {
   const isFav = a.favorite;
-  const displayDate = a.publicationDate
-    ? `📅 ${formatDate(a.publicationDate)}`
-    : `⬇ importé ${formatDate(a.date)}`;
+  const displayDate = publicationDateLabel(a);
   return `
     <div class="article-card">
       <div class="article-card-header">
@@ -762,7 +837,7 @@ function renderArticleCard(a) {
       <div class="article-card-meta">
         <span class="domain-badge ${domainClass(a.domain)}">${DOMAIN_ICONS[a.domain] || ''} ${a.domain || 'Non classé'}</span>
         <span class="status-badge ${statusClass(a.status)}">${statusLabel(a.status)}</span>
-        <span class="article-date">${displayDate}</span>
+        <span class="article-date" style="${a.publicationDate ? '' : 'color:var(--warning)'}">${displayDate}</span>
         ${a.url ? `<a href="${escHtml(a.url)}" target="_blank" style="font-size:11px;color:var(--accent)">🔗 Source</a>` : ''}
       </div>
       ${a.summary ? `<div class="article-summary-preview">${escHtml(a.summary)}</div>` : ''}
@@ -786,7 +861,6 @@ function deleteArticleFromVeille(id) {
 
 function _hardDelete(id) {
   state.articles = state.articles.filter(a => a.id !== id);
-  defenseRows = defenseRows.filter(r => r.sourceId !== id);
   // Sauvegarde locale immédiate
   try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
   // Push immédiat vers Supabase (pas de debounce — on veut que ce soit instantané)
@@ -835,12 +909,32 @@ function buildArticleDetail(a) {
     ? `<ul style="margin:8px 0 0 16px">${a.keyPoints.map(p => `<li style="margin-bottom:4px">${escHtml(p)}</li>`).join('')}</ul>`
     : '';
 
-  const dateLabel = a.publicationDate ? formatDate(a.publicationDate) : formatDate(a.date);
+  const dateLabel = publicationDateLabel(a, false);
+  // Valeur ISO (YYYY-MM-DD) pour pré-remplir l'input date, vide si non précisée
+  const dateInputValue = a.publicationDate ? a.publicationDate.substring(0, 10) : '';
 
   const summaryBlock = `
     <div class="summary-block">
-      <h3>${escHtml(a.titleFr || a.title)}</h3>
-      ${a.url ? `<p style="margin:6px 0 12px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a> <span style="color:var(--text-muted);font-size:12px">| ${dateLabel}</span></p>` : ''}
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+        <h3 style="flex:1">${escHtml(a.titleFr || a.title)}</h3>
+        <button class="btn-secondary small" onclick="copyArticleSummary('${a.id}', this)" title="Copier le résumé" style="flex-shrink:0">📋 Copier</button>
+      </div>
+      ${a.url ? `<p style="margin:6px 0 4px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a></p>` : ''}
+
+      <!-- Date de publication éditable -->
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 12px;flex-wrap:wrap">
+        <span style="font-size:12px;color:${a.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${a.publicationDate ? '📅' : '❔'} ${dateLabel}</span>
+        <button class="action-btn" onclick="toggleDateEdit('${a.id}')" title="Modifier la date" style="font-size:11px">✏ Modifier</button>
+      </div>
+      <div id="date-edit-${a.id}" style="display:none;margin-bottom:14px;padding:10px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px">
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Date de publication réelle</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="date" id="date-input-${a.id}" class="input-field" style="max-width:200px" value="${dateInputValue}" />
+          <button class="btn-primary small" onclick="saveArticleDate('${a.id}')">✓ Enregistrer</button>
+          <button class="btn-secondary small" onclick="clearArticleDate('${a.id}')">Effacer</button>
+        </div>
+      </div>
+
       <p style="line-height:1.7">${escHtml(a.summary || 'Aucun résumé généré')}</p>
       ${keyPointsHtml ? `<p style="margin-top:12px;font-weight:600;color:var(--text-primary)">Informations importantes :</p>${keyPointsHtml}` : ''}
     </div>
@@ -849,23 +943,26 @@ function buildArticleDetail(a) {
   // ── Tableau Défense ──
   let defenseTableHtml = '';
   if (a.domain === 'Défense' && Array.isArray(a.defenseTable) && a.defenseTable.length > 0) {
+    const catColors = { 'C4I': '#a78bfa', 'Fonctions': '#4a9eff', "Système d'armes": '#f87171' };
     const rows = a.defenseTable.map(row => {
       const statutColor = row.statut === 'Existant'
         ? 'var(--success)' : row.statut === 'En cours de développement'
-        ? 'var(--warning)' : 'var(--accent)';
+        ? 'var(--warning)' : row.statut === 'Concept' ? 'var(--accent)' : 'var(--text-muted)';
+      const catColor = catColors[row.categorie] || 'var(--text-muted)';
       return `<tr>
-        <td>${escHtml(row.fabricant || '—')}</td>
-        <td>${escHtml(row.produit   || '—')}</td>
-        <td>${escHtml(row.fonctionIA || '—')}</td>
-        <td><span style="color:${statutColor};font-weight:600;font-size:12px">${escHtml(row.statut || '—')}</span></td>
-        <td style="text-align:center">${escHtml(row.anneeSortie || '—')}</td>
+        <td>${escHtml(row.fabricant || 'non précisé')}</td>
+        <td>${escHtml(row.produit   || 'non précisé')}</td>
+        <td>${escHtml(row.fonctionIA || 'non précisé')}</td>
+        <td><span style="color:${statutColor};font-weight:600;font-size:12px">${escHtml(row.statut || 'non précisé')}</span></td>
+        <td style="text-align:center">${escHtml(row.anneeSortie || 'non précisé')}</td>
+        <td><span style="color:${catColor};font-weight:600;font-size:11px;padding:2px 8px;border-radius:4px;background:${catColor}1a">${escHtml(row.categorie || 'non précisé')}</span></td>
       </tr>`;
     }).join('');
 
     defenseTableHtml = `
       <div style="margin-top:20px">
         <h4 style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--beige);margin-bottom:12px;display:flex;align-items:center;gap:6px">
-          🪖 Systèmes & Technologies identifiés
+          🪖 Systèmes & Technologies IA identifiés
         </h4>
         <div style="overflow-x:auto;border-radius:8px;border:1px solid var(--navy-border)">
           <table style="width:100%;border-collapse:collapse;font-size:12.5px">
@@ -876,6 +973,7 @@ function buildArticleDetail(a) {
                 <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);border-bottom:1px solid var(--navy-border)">Fonction de l'IA</th>
                 <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Statut</th>
                 <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Année prévue</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);white-space:nowrap;border-bottom:1px solid var(--navy-border)">Catégorie</th>
               </tr>
             </thead>
             <tbody style="color:var(--text-secondary)">
@@ -883,12 +981,14 @@ function buildArticleDetail(a) {
             </tbody>
           </table>
         </div>
+        <button class="btn-secondary small" style="margin-top:10px" onclick="regenerateDefenseTable('${a.id}', this)">🔄 Régénérer ce tableau</button>
       </div>
     `;
   } else if (a.domain === 'Défense' && (!a.defenseTable || a.defenseTable.length === 0)) {
     defenseTableHtml = `
-      <div style="margin-top:16px;padding:10px 14px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px;font-size:12px;color:var(--text-muted)">
-        🪖 Aucun système spécifique identifié dans cet article
+      <div style="margin-top:16px;padding:10px 14px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px;font-size:12px;color:var(--text-muted);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <span>🪖 Aucun système IA spécifique identifié dans cet article</span>
+        <button class="btn-secondary small" onclick="regenerateDefenseTable('${a.id}', this)">🔄 Réessayer l'extraction</button>
       </div>
     `;
   }
@@ -906,11 +1006,106 @@ function buildArticleDetail(a) {
   return summaryBlock + defenseTableHtml + metaSection;
 }
 
+// ── Copier le résumé complet (titre, lien, date, résumé, points clés) ──
+function copyArticleSummary(id, btnEl) {
+  const a = state.articles.find(x => x.id === id);
+  if (!a) return;
+  const dateLabel = publicationDateLabel(a, false);
+  let text = `${a.titleFr || a.title}\n`;
+  if (a.url) text += `🔗 Lire en ligne | ${dateLabel}\n\n`;
+  else text += `${dateLabel}\n\n`;
+  text += `${a.summary || ''}\n\n`;
+  if (a.keyPoints && a.keyPoints.length > 0) {
+    text += `Informations importantes :\n`;
+    text += a.keyPoints.map(p => `• ${p}`).join('\n');
+  }
+
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('📋 Résumé copié', 'success');
+    if (btnEl) {
+      const original = btnEl.textContent;
+      btnEl.textContent = '✓ Copié !';
+      setTimeout(() => { btnEl.textContent = original; }, 1500);
+    }
+  }).catch(() => showToast('❌ Impossible de copier', 'error'));
+}
+
+// ── Édition manuelle de la date de publication ──
+function toggleDateEdit(id) {
+  const panel = document.getElementById(`date-edit-${id}`);
+  if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function saveArticleDate(id) {
+  const article = state.articles.find(a => a.id === id);
+  const input = document.getElementById(`date-input-${id}`);
+  if (!article || !input) return;
+
+  if (!input.value) {
+    showToast('⚠ Choisissez une date ou cliquez sur Effacer', 'warning');
+    return;
+  }
+
+  const d = new Date(input.value + 'T00:00:00');
+  if (isNaN(d.getTime())) {
+    showToast('⚠ Date invalide', 'warning');
+    return;
+  }
+
+  article.publicationDate = d.toISOString();
+  article.week     = getWeekNumber(d);
+  article.weekYear = getWeekYear(d);
+  article.month    = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
+  article.updatedAt = new Date().toISOString();
+
+  saveToStorage();
+  showToast('✅ Date mise à jour', 'success');
+  // Rafraîchir la modale et les listes
+  openArticleModal(id);
+  renderSavedArticles();
+  renderValidationQueue();
+  renderVeilleIfActive();
+}
+
+function clearArticleDate(id) {
+  const article = state.articles.find(a => a.id === id);
+  if (!article) return;
+  article.publicationDate = null;
+  article.updatedAt = new Date().toISOString();
+  saveToStorage();
+  showToast('❔ Date marquée comme non précisée', 'warning');
+  openArticleModal(id);
+  renderSavedArticles();
+  renderValidationQueue();
+  renderVeilleIfActive();
+}
+
+// ── Relancer manuellement l'extraction du tableau IA militaire ──
+async function regenerateDefenseTable(id, btnEl) {
+  const article = state.articles.find(a => a.id === id);
+  if (!article) return;
+  if (!state.settings.mistralKey) { showToast('⚠ Clé API Mistral requise', 'warning'); return; }
+
+  const originalText = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.textContent = '⏳ Extraction...'; btnEl.disabled = true; }
+
+  try {
+    const items = await extractDefenseTable(article);
+    article.defenseTable = items;
+    article.updatedAt = new Date().toISOString();
+    saveToStorage();
+    showToast(items.length > 0 ? `✅ ${items.length} système(s) identifié(s)` : 'ℹ Aucun système IA identifié', items.length > 0 ? 'success' : 'info');
+    openArticleModal(id); // Rafraîchir la modale
+  } catch(e) {
+    showToast('❌ Erreur d\'extraction : ' + e.message, 'error');
+    if (btnEl) { btnEl.textContent = originalText; btnEl.disabled = false; }
+  }
+}
+
 // ============ VEILLE ============
 function renderVeille() {
   renderVeilleFeatured();
   renderVeilleDomains();
-  renderDefenseTable();
 }
 
 function renderVeilleIfActive() {
@@ -940,7 +1135,7 @@ function renderVeilleFeatured() {
       </div>
       <div class="article-card-meta" style="margin-top:8px">
         <span class="domain-badge ${domainClass(a.domain)}">${DOMAIN_ICONS[a.domain] || ''} ${a.domain}</span>
-        <span class="article-date">${a.publicationDate ? '📅 ' + formatDate(a.publicationDate) : formatDate(a.date)}</span>
+        <span class="article-date" style="${a.publicationDate ? '' : 'color:var(--warning)'}">${publicationDateLabel(a)}</span>
       </div>
       ${a.summary ? `<div class="article-summary-preview">${escHtml(a.summary)}</div>` : ''}
     </div>
@@ -990,7 +1185,7 @@ function renderVeilleDomains() {
             </div>
             <div class="article-card-meta">
               ${a.url ? `<a href="${escHtml(a.url)}" target="_blank" style="font-size:11px;color:var(--accent)">🔗 Source</a>` : ''}
-              <span class="article-date">${a.publicationDate ? '📅 ' + formatDate(a.publicationDate) : formatDate(a.date)}</span>
+              <span class="article-date" style="${a.publicationDate ? '' : 'color:var(--warning)'}">${publicationDateLabel(a)}</span>
             </div>
             ${a.summary ? `<div class="article-summary-preview">${escHtml(a.summary)}</div>` : ''}
           </div>
@@ -1011,92 +1206,6 @@ function renderVeilleDomains() {
       </div>
     `;
   }).join('');
-}
-
-// ============ DEFENSE TABLE ============
-let defenseRows = [];
-
-function renderDefenseTable() {
-  const defenseArticles = state.articles.filter(a => a.domain === 'Défense' && a.status === 'VALIDATED');
-  const section = document.getElementById('defense-table-section');
-  if (!section) return;
-
-  if (defenseArticles.length === 0) {
-    section.style.display = 'none';
-    return;
-  }
-  section.style.display = '';
-
-  // Auto-add rows from defense articles
-  for (const a of defenseArticles) {
-    if (!defenseRows.find(r => r.sourceId === a.id)) {
-      defenseRows.push({
-        id: generateId(),
-        sourceId: a.id,
-        statut: 'En cours de développement',
-        fabricant: extractActorFromArticle(a),
-        produit: a.titleFr || a.title,
-        role: a.summary || '',
-        source: a.titleFr || a.title
-      });
-    }
-  }
-  renderDefenseTableRows();
-}
-
-function renderDefenseTableRows() {
-  const tbody = document.getElementById('defense-tbody');
-  if (!tbody) return;
-  tbody.innerHTML = defenseRows.map(row => `
-    <tr>
-      <td>
-        <select class="status-select" onchange="updateDefenseRow('${row.id}','statut',this.value)">
-          <option ${row.statut === 'Concept' ? 'selected' : ''}>Concept</option>
-          <option ${row.statut === 'En cours de développement' ? 'selected' : ''}>En cours de développement</option>
-          <option ${row.statut === 'Existant' ? 'selected' : ''}>Existant</option>
-        </select>
-      </td>
-      <td contenteditable="true" onblur="updateDefenseRow('${row.id}','fabricant',this.textContent)">${escHtml(row.fabricant)}</td>
-      <td contenteditable="true" onblur="updateDefenseRow('${row.id}','produit',this.textContent)">${escHtml(row.produit)}</td>
-      <td contenteditable="true" onblur="updateDefenseRow('${row.id}','role',this.textContent)">${escHtml(row.role)}</td>
-      <td style="font-size:11px;color:var(--text-muted)">${escHtml(row.source.substring(0, 50))}</td>
-      <td>
-        <button class="action-btn" onclick="removeDefenseRow('${row.id}')" title="Supprimer">🗑</button>
-      </td>
-    </tr>
-  `).join('');
-}
-
-function updateDefenseRow(id, field, value) {
-  const row = defenseRows.find(r => r.id === id);
-  if (row) row[field] = value;
-}
-
-function addDefenseRow() {
-  defenseRows.push({
-    id: generateId(),
-    sourceId: null,
-    statut: 'Concept',
-    fabricant: 'Nouveau fabricant',
-    produit: 'Nouveau produit',
-    role: 'Rôle de l\'IA',
-    source: 'Manuel'
-  });
-  renderDefenseTableRows();
-}
-
-function removeDefenseRow(id) {
-  defenseRows = defenseRows.filter(r => r.id !== id);
-  renderDefenseTableRows();
-}
-
-function extractActorFromArticle(a) {
-  const text = (a.content || '') + ' ' + (a.title || '');
-  const companies = ['Thales', 'Airbus', 'Dassault', 'MBDA', 'Nexter', 'Safran', 'Leonardo', 'Lockheed', 'Raytheon', 'Boeing', 'BAE Systems', 'Northrop'];
-  for (const c of companies) {
-    if (text.toLowerCase().includes(c.toLowerCase())) return c;
-  }
-  return 'Non identifié';
 }
 
 // ============ ANALYSE ============
@@ -1701,7 +1810,7 @@ function weekMap_label(key) {
 
 // Format a single article in the exact requested style
 function formatArticleNewsletter(a) {
-  const dateStr = a.publicationDate ? formatDateShort(a.publicationDate) : formatDateShort(a.date);
+  const dateStr = publicationDateLabel(a, false);
   const link = a.url ? `🔗 Lire en ligne` : '';
   const linkPart = a.url ? `[🔗 Lire en ligne](${a.url})` : '';
   const points = (a.keyPoints || []).map(p => `• ${p}`).join('\n');
@@ -1723,7 +1832,6 @@ function formatArticleNewsletter(a) {
 // Format merged articles (same topic, multiple sources)
 function formatArticleNewsletterMerged(articles) {
   const main = articles[0];
-  const dateStr = main.publicationDate ? formatDateShort(main.publicationDate) : formatDateShort(main.date);
 
   // Combine all unique key points
   const allPoints = [];
@@ -1733,7 +1841,7 @@ function formatArticleNewsletterMerged(articles) {
   let block = '';
   block += `${main.titleFr || main.title}\n`;
   // Multiple links listed
-  articles.forEach(a => { if (a.url) block += `[🔗 Lire en ligne](${a.url}) | ${a.publicationDate ? formatDateShort(a.publicationDate) : formatDateShort(a.date)}\n`; });
+  articles.forEach(a => { if (a.url) block += `[🔗 Lire en ligne](${a.url}) | ${publicationDateLabel(a, false)}\n`; });
   block += `\n`;
   block += `${main.summary || ''}\n`;
   block += `\n`;
@@ -1949,7 +2057,6 @@ function clearAllData() {
   if (!confirm('⚠ Vider toutes les données ? Cette action est irréversible.')) return;
   state.articles = [];
   state.chatHistory = [];
-  defenseRows = [];
   saveToStorage();
   renderAllViews();
   showToast('🗑 Données effacées', 'warning');
@@ -2162,6 +2269,15 @@ function formatDate(iso) {
   try {
     return new Date(iso).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
   } catch(e) { return iso; }
+}
+
+// Label de date d'un article : date de publication si connue, sinon "Date non précisée"
+// (ne retombe JAMAIS sur la date d'import pour éviter d'afficher une fausse date)
+function publicationDateLabel(article, withIcon = true) {
+  if (article.publicationDate) {
+    return (withIcon ? '📅 ' : '') + formatDate(article.publicationDate);
+  }
+  return (withIcon ? '❔ ' : '') + 'Date non précisée';
 }
 
 function escHtml(str) {
