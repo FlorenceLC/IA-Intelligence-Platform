@@ -919,13 +919,8 @@ function buildArticleDetail(a) {
         <h3 style="flex:1">${escHtml(a.titleFr || a.title)}</h3>
         <button class="btn-secondary small" onclick="copyArticleSummary('${a.id}', this)" title="Copier le résumé" style="flex-shrink:0">📋 Copier</button>
       </div>
-      ${a.url ? `<p style="margin:6px 0 4px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a></p>` : ''}
-
-      <!-- Date de publication éditable -->
-      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 12px;flex-wrap:wrap">
-        <span style="font-size:12px;color:${a.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${a.publicationDate ? '📅' : '❔'} ${dateLabel}</span>
-        <button class="action-btn" onclick="toggleDateEdit('${a.id}')" title="Modifier la date" style="font-size:11px">✏ Modifier</button>
-      </div>
+      ${a.url ? `<p style="margin:6px 0 4px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a> <span style="color:var(--text-muted);font-size:12px">| ${dateLabel}</span></p>` : `<p style="margin:6px 0 4px;color:var(--text-muted);font-size:12px">${dateLabel}</p>`}
+      <button class="action-btn" onclick="toggleDateEdit('${a.id}')" title="Modifier la date" style="font-size:11px;margin-bottom:10px">✏ Modifier la date</button>
       <div id="date-edit-${a.id}" style="display:none;margin-bottom:14px;padding:10px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px">
         <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Date de publication réelle</label>
         <div style="display:flex;gap:8px;align-items:center">
@@ -1011,23 +1006,59 @@ function copyArticleSummary(id, btnEl) {
   const a = state.articles.find(x => x.id === id);
   if (!a) return;
   const dateLabel = publicationDateLabel(a, false);
-  let text = `${a.titleFr || a.title}\n`;
-  if (a.url) text += `🔗 Lire en ligne | ${dateLabel}\n\n`;
-  else text += `${dateLabel}\n\n`;
-  text += `${a.summary || ''}\n\n`;
+
+  // ── Version texte brut (fallback) ──
+  let plainText = `${a.titleFr || a.title}\n`;
+  if (a.url) plainText += `🔗 Lire en ligne | ${dateLabel}\n\n`;
+  else plainText += `${dateLabel}\n\n`;
+  plainText += `${a.summary || ''}\n\n`;
   if (a.keyPoints && a.keyPoints.length > 0) {
-    text += `Informations importantes :\n`;
-    text += a.keyPoints.map(p => `• ${p}`).join('\n');
+    plainText += `Informations importantes :\n`;
+    plainText += a.keyPoints.map(p => `• ${p}`).join('\n');
   }
 
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('📋 Résumé copié', 'success');
-    if (btnEl) {
-      const original = btnEl.textContent;
-      btnEl.textContent = '✓ Copié !';
-      setTimeout(() => { btnEl.textContent = original; }, 1500);
-    }
-  }).catch(() => showToast('❌ Impossible de copier', 'error'));
+  // ── Version HTML riche : titre en h3, "Informations importantes" en gras, vraie liste à puces ──
+  const linkLine = a.url
+    ? `<a href="${escHtml(a.url)}">🔗 Lire en ligne</a> | ${escHtml(dateLabel)}`
+    : escHtml(dateLabel);
+  const pointsHtml = (a.keyPoints && a.keyPoints.length > 0)
+    ? `<p><strong>Informations importantes :</strong></p><ul>${a.keyPoints.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
+    : '';
+  const richHtml =
+    `<h3>${escHtml(a.titleFr || a.title)}</h3>` +
+    `<p>${linkLine}</p>` +
+    `<p>${escHtml(a.summary || '')}</p>` +
+    pointsHtml;
+
+  // ── Copie avec fallback : HTML riche si supporté, sinon texte brut ──
+  if (navigator.clipboard && window.ClipboardItem) {
+    const blobHtml  = new Blob([richHtml],  { type: 'text/html'  });
+    const blobPlain = new Blob([plainText], { type: 'text/plain' });
+    navigator.clipboard.write([
+      new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })
+    ]).then(() => {
+      showToast('📋 Résumé copié (avec mise en forme)', 'success');
+      flashCopyButton(btnEl);
+    }).catch(() => {
+      // Si l'écriture riche échoue (ex: hors contexte sécurisé), fallback texte brut
+      navigator.clipboard.writeText(plainText).then(() => {
+        showToast('📋 Résumé copié', 'success');
+        flashCopyButton(btnEl);
+      }).catch(() => showToast('❌ Impossible de copier', 'error'));
+    });
+  } else {
+    navigator.clipboard.writeText(plainText).then(() => {
+      showToast('📋 Résumé copié', 'success');
+      flashCopyButton(btnEl);
+    }).catch(() => showToast('❌ Impossible de copier', 'error'));
+  }
+}
+
+function flashCopyButton(btnEl) {
+  if (!btnEl) return;
+  const original = btnEl.textContent;
+  btnEl.textContent = '✓ Copié !';
+  setTimeout(() => { btnEl.textContent = original; }, 1500);
 }
 
 // ── Édition manuelle de la date de publication ──
@@ -3032,7 +3063,10 @@ function gistHeaders() {
 }
 
 // ── PULL : lire le Gist ──────────────────────────────────────
-async function gistPull() {
+// gistPullRaw : version complète qui détecte la troncature du contenu par l'API GitHub
+// GitHub tronque le champ "content" des fichiers > ~1Mo dans la réponse JSON du Gist.
+// Dans ce cas, il faut re-télécharger le contenu complet via raw_url.
+async function gistPullRaw() {
   const resp = await fetch(`https://api.github.com/gists/${GIST.gistId}`, {
     headers: gistHeaders()
   });
@@ -3045,18 +3079,46 @@ async function gistPull() {
   const data = await resp.json();
 
   // Cherche le fichier par nom exact, puis par extension .json en fallback
-  let raw = data.files?.[GIST.file]?.content;
-  if (!raw) {
-    // Fallback : prend le premier fichier .json du Gist
-    const jsonFile = Object.values(data.files || {}).find(f => f.filename.endsWith('.json'));
-    if (jsonFile) {
-      raw = jsonFile.content;
-      GIST.file = jsonFile.filename; // met à jour le nom pour le push
-      console.log('Gist: fichier trouvé par fallback :', jsonFile.filename);
+  let file = data.files?.[GIST.file];
+  if (!file) {
+    file = Object.values(data.files || {}).find(f => f.filename.endsWith('.json'));
+    if (file) {
+      GIST.file = file.filename;
+      console.log('[SYNC] Fichier trouvé par fallback :', file.filename);
     }
   }
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch(e) { return null; }
+  if (!file) return { data: null, truncated: false };
+
+  let raw = file.content;
+
+  // Si GitHub a tronqué le contenu, on récupère le contenu complet via raw_url
+  if (file.truncated && file.raw_url) {
+    console.log('[SYNC] Contenu tronqué détecté, récupération via raw_url...');
+    try {
+      const rawResp = await fetch(file.raw_url, { headers: gistHeaders() });
+      if (rawResp.ok) {
+        raw = await rawResp.text();
+      } else {
+        return { data: null, truncated: true };
+      }
+    } catch(e) {
+      return { data: null, truncated: true };
+    }
+  }
+
+  if (!raw) return { data: null, truncated: false };
+  try {
+    return { data: JSON.parse(raw), truncated: false };
+  } catch(e) {
+    console.warn('[SYNC] JSON.parse a échoué — le contenu est probablement tronqué/corrompu');
+    return { data: null, truncated: true };
+  }
+}
+
+// Wrapper conservé pour compatibilité avec d'anciens appels
+async function gistPull() {
+  const result = await gistPullRaw();
+  return result.data;
 }
 
 // ── PUSH : écrire le Gist ────────────────────────────────────
@@ -3099,6 +3161,8 @@ function mergeFeeds(local, remote) {
 }
 
 async function syncNow(silent = false) {
+  const sidebarBtn = document.getElementById('sync-sidebar-btn');
+
   if (!gistConfigured()) {
     if (!silent) {
       showToast('⚠ Configurez le Gist dans Paramètres', 'warning');
@@ -3108,6 +3172,8 @@ async function syncNow(silent = false) {
     updateStats();
     return;
   }
+
+  if (sidebarBtn) sidebarBtn.classList.add('syncing');
   if (!silent) showLoading('Synchronisation Gist...');
 
   const resultEl = document.getElementById('sync-result');
@@ -3121,8 +3187,15 @@ async function syncNow(silent = false) {
 
     // 1. PULL
     console.log('[SYNC] Pull depuis Gist...');
-    const remote = await gistPull();
-    console.log('[SYNC] Pull OK — articles distants:', remote?.articles?.length ?? 0, '| feeds:', remote?.rssFeeds?.length ?? 0);
+    const pullResult = await gistPullRaw();
+    const remote = pullResult.data;
+    console.log('[SYNC] Pull OK — articles distants:', remote?.articles?.length ?? 0, '| feeds:', remote?.rssFeeds?.length ?? 0, '| tronqué:', pullResult.truncated);
+
+    if (pullResult.truncated) {
+      // Le fichier distant dépasse la limite Gist (~1Mo) et a été tronqué par l'API GitHub.
+      // On ne fusionne PAS dans ce cas pour éviter d'écraser des données avec un état incomplet.
+      throw new Error('Le fichier Gist est trop volumineux et a été tronqué par GitHub (limite ~1 Mo). Les données distantes sont incomplètes — la sync a été annulée pour éviter une perte de données. Réduisez le nombre d\'articles ou contactez le support.');
+    }
 
     // 2. MERGE
     const localCount = state.articles.length;
@@ -3142,7 +3215,7 @@ async function syncNow(silent = false) {
 
     const addedArticles = state.articles.length - localCount;
     const addedFeeds    = state.rssFeeds.length - localFeedsCount;
-    console.log('[SYNC] Merge OK — +articles:', addedArticles, '| +feeds:', addedFeeds);
+    console.log('[SYNC] Merge OK — +articles:', addedArticles, '| +feeds:', addedFeeds, '| total:', state.articles.length);
 
     // 3. PUSH
     console.log('[SYNC] Push vers Gist...');
@@ -3158,22 +3231,24 @@ async function syncNow(silent = false) {
     try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
 
     if (!silent) hideLoading();
+    if (sidebarBtn) sidebarBtn.classList.remove('syncing');
     renderAllViews();
     updateStats();
     updateSyncUI(true);
 
     const msg = addedArticles > 0 || addedFeeds > 0
-      ? `☁ Sync OK — +${addedArticles} article(s), +${addedFeeds} flux RSS`
-      : '☁ Synchronisation Gist réussie';
+      ? `☁ Sync OK — +${addedArticles} article(s), +${addedFeeds} flux RSS (total : ${state.articles.length})`
+      : `☁ Synchronisation OK — ${state.articles.length} articles à jour`;
     if (!silent) showToast(msg, 'success');
 
   } catch(e) {
     if (!silent) hideLoading();
+    if (sidebarBtn) sidebarBtn.classList.remove('syncing');
     console.error('[SYNC] Erreur:', e.message);
     renderAllViews();
     updateStats();
     updateSyncUI(false, e.message);
-    if (!silent) showToast('⚠ Sync Gist : ' + e.message, 'warning');
+    if (!silent) showToast('⚠ Sync : ' + e.message, 'warning');
   }
 }
 

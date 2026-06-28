@@ -58,8 +58,14 @@
   </nav>
 
   <div class="sidebar-footer">
-    <div class="status-dot active"></div>
-    <span>Mistral connecté</span>
+    <button class="sync-btn-sidebar" id="sync-sidebar-btn" onclick="syncNow(false)" title="Synchroniser avec les autres appareils">
+      <span class="sync-icon">🔄</span>
+      <span>Synchroniser les appareils</span>
+    </button>
+    <div class="sidebar-status-row">
+      <div class="status-dot active"></div>
+      <span>Mistral connecté</span>
+    </div>
   </div>
 </aside>
 
