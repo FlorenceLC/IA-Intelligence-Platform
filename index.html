@@ -264,6 +264,17 @@
   <section class="tab-content" id="tab-veille">
     <div class="veille-layout">
 
+      <!-- Barre d'outils Veille -->
+      <div class="card full-width" style="padding:12px 20px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:13px;color:var(--text-muted);flex:1">Actions rapides</span>
+          <button class="btn-secondary small" onclick="generateMissingSummaries()" title="Générer les résumés manquants pour tous les articles validés sans résumé">
+            🤖 Générer résumés manquants
+          </button>
+          <span id="veille-missing-count" style="font-size:11px;color:var(--text-muted)"></span>
+        </div>
+      </div>
+
       <!-- Articles à la une dans veille -->
       <div class="card full-width veille-featured">
         <div class="card-header">
@@ -389,10 +400,17 @@
         <div class="export-options">
           <div class="form-group">
             <label>Période</label>
-            <select id="export-period" class="input-field">
+            <select id="export-period" class="input-field" onchange="toggleConfluenceWeekPicker()">
               <option value="week">Semaine courante</option>
+              <option value="specific-week">Semaine spécifique</option>
               <option value="month">Mois courant</option>
               <option value="all">Tout</option>
+            </select>
+          </div>
+          <div class="form-group" id="confluence-week-picker" style="display:none">
+            <label>Sélectionner la semaine</label>
+            <select id="export-specific-week" class="input-field">
+              <option value="">Chargement...</option>
             </select>
           </div>
           <div class="form-group">
