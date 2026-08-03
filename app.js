@@ -118,11 +118,11 @@ function switchTab(tab) {
     document.getElementById('page-title').textContent = meta.title;
     document.getElementById('page-subtitle').textContent = meta.subtitle;
   }
-  if (tab === 'veille') { renderVeille(); updateVeilleMissingCount(); }
+  if (tab === 'veille') renderVeille();
   if (tab === 'analyse') renderAnalyse();
   if (tab === 'settings') { renderSettings(); renderGistSettings(); }
   if (tab === 'rss') renderRssTab();
-  if (tab === 'export') { renderNewsletterWeekSelector(); populateConfluenceWeekSelect(); }
+  if (tab === 'export') renderNewsletterWeekSelector();
 }
 
 // ============ IMPORT ============
@@ -168,47 +168,26 @@ async function importArticle() {
 
         // ── Extract publication date directly from HTML meta tags ──
         const dateCandidates = [
-          // JSON-LD (highest priority — most reliable)
+          // JSON-LD
           html.match(/"datePublished"\s*:\s*"([^"]+)"/i)?.[1],
           html.match(/"date_published"\s*:\s*"([^"]+)"/i)?.[1],
-          html.match(/"dateCreated"\s*:\s*"([^"]+)"/i)?.[1],
-          html.match(/"publishedAt"\s*:\s*"([^"]+)"/i)?.[1],
-          html.match(/"created_at"\s*:\s*"(\d{4}-\d{2}-\d{2}[^"]*)"/i)?.[1],
           // OG / meta tags
           html.match(/property=["']article:published_time["'][^>]*content=["']([^"']+)["']/i)?.[1],
           html.match(/content=["']([^"']+)["'][^>]*property=["']article:published_time["']/i)?.[1],
           html.match(/name=["']pubdate["'][^>]*content=["']([^"']+)["']/i)?.[1],
           html.match(/name=["']publish_date["'][^>]*content=["']([^"']+)["']/i)?.[1],
           html.match(/name=["']date["'][^>]*content=["']([^"']+)["']/i)?.[1],
-          html.match(/name=["']DC\.date\.issued["'][^>]*content=["']([^"']+)["']/i)?.[1],
-          html.match(/name=["']DC\.date["'][^>]*content=["']([^"']+)["']/i)?.[1],
-          // <time> tags — prioritise those near "publish" classes
-          html.match(/<time[^>]*datetime=["']([^"']+)["'][^>]*class=["'][^"']*publish[^"']*["']/i)?.[1],
-          html.match(/<time[^>]*class=["'][^"']*publish[^"']*["'][^>]*datetime=["']([^"']+)["']/i)?.[1],
+          // <time> tags
           html.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1],
           // Microdata
           html.match(/itemprop=["']datePublished["'][^>]*content=["']([^"']+)["']/i)?.[1],
           html.match(/itemprop=["']datePublished["'][^>]*datetime=["']([^"']+)["']/i)?.[1],
-          // data-* attributes
-          html.match(/data-publish-?date=["']([^"']+)["']/i)?.[1],
-          html.match(/data-date=["']([^"']+)["']/i)?.[1],
         ].filter(Boolean);
 
-        const _currentYear = new Date().getFullYear();
-        const _frMonths = {janvier:0,f\u00e9vrier:1,fevrier:1,mars:2,avril:3,mai:4,juin:5,
-          juillet:6,ao\u00fbt:7,aout:7,septembre:8,octobre:9,novembre:10,d\u00e9cembre:11,decembre:11};
         for (const candidate of dateCandidates) {
           try {
-            let normalized = (candidate || '').trim();
-            // Partial date "2025-03" → first of month
-            if (/^\d{4}-\d{2}$/.test(normalized)) normalized += '-01';
-            // French text date "12 janvier 2025"
-            const frMatch = normalized.match(/(\d{1,2})\s+(\w+)\s+(\d{4})/i);
-            if (frMatch && _frMonths[frMatch[2].toLowerCase()] !== undefined) {
-              normalized = frMatch[3] + '-' + String(_frMonths[frMatch[2].toLowerCase()] + 1).padStart(2,'0') + '-' + String(frMatch[1]).padStart(2,'0');
-            }
-            const d = new Date(normalized);
-            if (!isNaN(d.getTime()) && d.getFullYear() >= 2010 && d.getFullYear() <= _currentYear + 1) {
+            const d = new Date(candidate);
+            if (!isNaN(d.getTime()) && d.getFullYear() > 2000 && d.getFullYear() <= new Date().getFullYear() + 1) {
               extractedPubDate = d.toISOString();
               break;
             }
@@ -340,7 +319,7 @@ Structure JSON obligatoire :
   "publicationDate": "date de publication au format YYYY-MM-DD UNIQUEMENT si elle est explicitement écrite dans le contenu fourni, sinon null"
 }
 Les keyPoints doivent contenir entre 3 et 10 éléments, chacun commençant par un emoji.
-RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme \"12 janvier 2025\" ou \"January 12, 2025\"). IMPORTANT : si tu trouves le jour et le mois mais pas l'année, cherche l'année dans le reste du texte — si introuvable, retourne null. L'année est OBLIGATOIRE dans la date (format YYYY-MM-DD), sans elle retourne null. L'année doit être réaliste (entre 2010 et 2027). Si aucune date complète et explicite n'est trouvée, tu DOIS répondre null.`
+RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme "12 janvier 2025"). Si aucune date explicite n'est trouvée dans le contenu fourni, tu DOIS répondre null — ne propose jamais la date du jour ni une date approximative basée sur le contexte.`
         },
         { role: 'user', content: prompt }
       ]
@@ -1132,39 +1111,6 @@ function clearArticleDate(id) {
   renderVeilleIfActive();
 }
 
-// ── Édition de date directement depuis la carte Veille (sans ouvrir la modale) ──
-function toggleVeilleDateEdit(id) {
-  const panel = document.getElementById(`veille-date-edit-${id}`);
-  if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-}
-
-function saveVeilleDate(id) {
-  const article = state.articles.find(a => a.id === id);
-  const input = document.getElementById(`veille-date-input-${id}`);
-  if (!article || !input) return;
-  if (!input.value) { showToast('⚠ Choisissez une date ou cliquez sur Effacer', 'warning'); return; }
-  const d = new Date(input.value + 'T00:00:00');
-  if (isNaN(d.getTime())) { showToast('⚠ Date invalide', 'warning'); return; }
-  article.publicationDate = d.toISOString();
-  article.week     = getWeekNumber(d);
-  article.weekYear = getWeekYear(d);
-  article.month    = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
-  article.updatedAt = new Date().toISOString();
-  saveToStorage();
-  showToast('✅ Date mise à jour', 'success');
-  renderVeille();
-}
-
-function clearVeilleDate(id) {
-  const article = state.articles.find(a => a.id === id);
-  if (!article) return;
-  article.publicationDate = null;
-  article.updatedAt = new Date().toISOString();
-  saveToStorage();
-  showToast('❔ Date effacée', 'warning');
-  renderVeille();
-}
-
 // ── Relancer manuellement l'extraction du tableau IA militaire ──
 async function regenerateDefenseTable(id, btnEl) {
   const article = state.articles.find(a => a.id === id);
@@ -1188,63 +1134,9 @@ async function regenerateDefenseTable(id, btnEl) {
 }
 
 // ============ VEILLE ============
-// ── Générer les résumés manquants pour les articles validés ──
-async function generateMissingSummaries() {
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
-    return;
-  }
-  const missing = state.articles.filter(a => a.status === 'VALIDATED' && !a.summary);
-  const countEl = document.getElementById('veille-missing-count');
-  if (missing.length === 0) {
-    showToast('✅ Tous les articles validés ont déjà un résumé', 'success');
-    if (countEl) countEl.textContent = '';
-    return;
-  }
-  showLoading(`Génération de ${missing.length} résumé(s)...`);
-  let done = 0;
-  for (const article of missing) {
-    try {
-      const result = await generateSummaryWithMistral(article);
-      article.summary   = result.summary   || '';
-      article.keyPoints = result.keyPoints || [];
-      if (result.titleFr) article.titleFr = result.titleFr;
-      if (result.domain && !article.domain) article.domain = result.domain;
-      if (!article.publicationDate && result.publicationDate) {
-        try {
-          const d = new Date(result.publicationDate);
-          if (!isNaN(d.getTime()) && d.getFullYear() >= 2010) {
-            article.publicationDate = d.toISOString();
-            article.week = getWeekNumber(d);
-            article.weekYear = getWeekYear(d);
-            article.month = d.toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
-          }
-        } catch(e) {}
-      }
-      article.updatedAt = new Date().toISOString();
-      done++;
-    } catch(e) {
-      console.warn('Résumé échoué pour', article.id, e.message);
-    }
-  }
-  saveToStorage();
-  hideLoading();
-  renderVeille();
-  updateVeilleMissingCount();
-  showToast(`✅ ${done} résumé(s) généré(s)`, 'success');
-}
-
-function updateVeilleMissingCount() {
-  const countEl = document.getElementById('veille-missing-count');
-  if (!countEl) return;
-  const n = state.articles.filter(a => a.status === 'VALIDATED' && !a.summary).length;
-  countEl.textContent = n > 0 ? `${n} article${n > 1 ? 's' : ''} sans résumé` : '';
-}
-
 function renderVeille() {
   renderVeilleFeatured();
   renderVeilleDomains();
-  updateVeilleMissingCount();
 }
 
 function renderVeilleIfActive() {
@@ -1325,19 +1217,11 @@ function renderVeilleDomains() {
             <div class="article-card-meta">
               ${a.url ? `<a href="${escHtml(a.url)}" target="_blank" style="font-size:11px;color:var(--accent)">🔗 Source</a>` : ''}
               <span class="article-date" style="${a.publicationDate ? '' : 'color:var(--warning)'}">${publicationDateLabel(a)}</span>
-              <button class="action-btn" onclick="toggleVeilleDateEdit('${a.id}')" title="Modifier la date" style="font-size:10px;padding:1px 5px;color:var(--text-muted)">✏ date</button>
             </div>
-            <div id="veille-date-edit-${a.id}" style="display:none;margin-top:6px;padding:8px 10px;background:var(--navy);border:1px solid var(--navy-border);border-radius:6px">
-              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                <label style="font-size:11px;color:var(--text-muted)">Date de publication :</label>
-                <input type="date" id="veille-date-input-${a.id}" class="input-field" style="max-width:160px;padding:3px 8px;font-size:12px" value="${a.publicationDate ? a.publicationDate.substring(0,10) : ''}" />
-                <button class="btn-primary small" onclick="saveVeilleDate('${a.id}')">✓ Enregistrer</button>
-                <button class="btn-secondary small" onclick="clearVeilleDate('${a.id}')">Effacer</button>
-              </div>
-            </div>
-            ${a.summary ? `<div class="article-summary-preview">${escHtml(a.summary)}</div>` : `<div class="article-summary-preview" style="color:var(--text-muted);font-style:italic;font-size:11px">⚠ Aucun résumé — utilisez 🤖 Générer résumés manquants</div>`}
+            ${a.summary ? `<div class="article-summary-preview">${escHtml(a.summary)}</div>` : ''}
           </div>
-        `).join('')}      </div>
+        `).join('')}
+      </div>
     `).join('');
 
     return `
@@ -1819,38 +1703,6 @@ function createMessageHTML(role, content) {
 }
 
 // ============ EXPORT ============
-function toggleConfluenceWeekPicker() {
-  const period = document.getElementById('export-period').value;
-  const picker = document.getElementById('confluence-week-picker');
-  if (!picker) return;
-  if (period === 'specific-week') {
-    picker.style.display = '';
-    populateConfluenceWeekSelect();
-  } else {
-    picker.style.display = 'none';
-  }
-}
-
-function populateConfluenceWeekSelect() {
-  const sel = document.getElementById('export-specific-week');
-  if (!sel) return;
-  const validated = state.articles.filter(a => a.status === 'VALIDATED');
-  const weekMap = {};
-  for (const a of validated) {
-    const key = weekKey(a);
-    if (!weekMap[key]) weekMap[key] = { label: weekLabel(a), count: 0 };
-    weekMap[key].count++;
-  }
-  const weeks = Object.entries(weekMap).sort((a, b) => b[0].localeCompare(a[0]));
-  if (weeks.length === 0) {
-    sel.innerHTML = `<option value="">Aucune semaine disponible</option>`;
-    return;
-  }
-  sel.innerHTML = weeks.map(([key, { label, count }]) =>
-    `<option value="${key}">${label} (${count} article${count > 1 ? 's' : ''})</option>`
-  ).join('');
-}
-
 function exportConfluence() {
   const period = document.getElementById('export-period').value;
   const selectedDomains = [...document.querySelectorAll('#export-domains input:checked')].map(i => i.value);
@@ -1860,10 +1712,6 @@ function exportConfluence() {
   if (period === 'week') {
     const w = getWeekNumber(new Date()); const y = getWeekYear(new Date());
     articles = articles.filter(a => a.week === w && (a.weekYear || y) === y);
-  } else if (period === 'specific-week') {
-    const selectedKey = document.getElementById('export-specific-week').value;
-    if (!selectedKey) { showToast('⚠ Sélectionnez une semaine', 'warning'); return; }
-    articles = articles.filter(a => weekKey(a) === selectedKey);
   } else if (period === 'month') {
     const thisMonth = new Date().toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
     articles = articles.filter(a => a.month === thisMonth);
@@ -2278,7 +2126,7 @@ async function analysepastedText() {
         messages: [
           {
             role: 'system',
-            content: `Tu es un expert en veille IA. On te donne un texte avec des liens et descriptions. 
+            content: `Tu es un expert en veille IA. On te donne un texte avec des liens et descriptions.
 Tu dois identifier uniquement les liens dont le sujet traite d'intelligence artificielle, machine learning, LLM, robotique, automatisation IA, ou technologies IA.
 RÉPONDS UNIQUEMENT avec un JSON valide : { "ai_urls": ["url1", "url2"] }
 Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
@@ -2308,16 +2156,20 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
   showLoading(`${aiUrls.length} lien(s) IA détecté(s) — génération des résumés...`);
 
   // 3. Générer un résumé pour chaque URL IA
+  // ⚠️ On accumule les articles dans un tableau temporaire et on sauvegarde UNE SEULE FOIS à la fin
+  // pour éviter que syncAfterChange écrase le state pendant la boucle
+  const newArticles = [];
   let done = 0;
-  let added = 0;
 
   for (const url of aiUrls) {
     showLoading(`Résumé ${done + 1} / ${aiUrls.length} : ${url.substring(0, 60)}...`);
     try {
-      // Vérifier doublon URL
-      const existingUrls = new Set(state.articles.map(a => normalizeUrl(a.url)));
+      // Vérifier doublon URL (inclure les articles déjà ajoutés dans cette session)
+      const existingUrls = new Set([
+        ...state.articles.map(a => normalizeUrl(a.url)),
+        ...newArticles.map(a => normalizeUrl(a.url))
+      ]);
       if (existingUrls.has(normalizeUrl(url))) {
-        showToast(`⚠ Déjà importé : ${url.substring(0, 50)}...`, 'warning');
         done++;
         continue;
       }
@@ -2333,50 +2185,41 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
           const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
           pageTitle = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
 
-          // Date de publication — extraction étendue
           const dateCandidates = [
             html.match(/"datePublished"\s*:\s*"([^"]+)"/i)?.[1],
-            html.match(/"date_published"\s*:\s*"([^"]+)"/i)?.[1],
-            html.match(/"dateCreated"\s*:\s*"([^"]+)"/i)?.[1],
-            html.match(/"publishedAt"\s*:\s*"([^"]+)"/i)?.[1],
             html.match(/property=["']article:published_time["'][^>]*content=["']([^"']+)["']/i)?.[1],
             html.match(/content=["']([^"']+)["'][^>]*property=["']article:published_time["']/i)?.[1],
-            html.match(/name=["']pubdate["'][^>]*content=["']([^"']+)["']/i)?.[1],
-            html.match(/name=["']publish_date["'][^>]*content=["']([^"']+)["']/i)?.[1],
-            html.match(/itemprop=["']datePublished["'][^>]*content=["']([^"']+)["']/i)?.[1],
-            html.match(/itemprop=["']datePublished["'][^>]*datetime=["']([^"']+)["']/i)?.[1],
-            html.match(/<time[^>]*datetime=["']([^"']+)["'][^>]*class=["'][^"']*publish[^"']*["']/i)?.[1],
             html.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1],
-            html.match(/data-publish-?date=["']([^"']+)["']/i)?.[1],
           ].filter(Boolean);
-          const _rssCurrentYear = new Date().getFullYear();
           for (const c of dateCandidates) {
             try {
-              let norm = (c || '').trim();
-              if (/^\d{4}-\d{2}$/.test(norm)) norm += '-01';
-              const d = new Date(norm);
-              if (!isNaN(d.getTime()) && d.getFullYear() >= 2010 && d.getFullYear() <= _rssCurrentYear + 1) {
+              const d = new Date(c);
+              if (!isNaN(d.getTime()) && d.getFullYear() > 2000 && d.getFullYear() <= new Date().getFullYear() + 1) {
                 extractedPubDate = d.toISOString(); break;
               }
             } catch(e) {}
           }
 
-          pageText = html.replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ')
-            .replace(/<[^>]+>/g,' ').replace(/\s{3,}/g,' ').trim().substring(0, 4000);
+          pageText = html
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s{3,}/g, ' ').trim().substring(0, 4000);
         }
       } catch(e) {}
 
       const now = new Date();
+      const refDate = extractedPubDate ? new Date(extractedPubDate) : now;
       const articleData = {
-        id: generateId(), url, title: pageTitle || url, titleFr: '',
-        content: pageText, domain: '', status: 'NEW',
-        date: now.toISOString(), publicationDate: extractedPubDate,
-        week: extractedPubDate ? getWeekNumber(new Date(extractedPubDate)) : getWeekNumber(now),
-        weekYear: extractedPubDate ? getWeekYear(new Date(extractedPubDate)) : getWeekYear(now),
-        month: extractedPubDate
-          ? new Date(extractedPubDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' })
-          : now.toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
-        favorite: false, summary: '', keyPoints: [], fromPaste: true
+        id: generateId(), url,
+        title: pageTitle || url, titleFr: '',
+        content: pageText, domain: '', status: 'PENDING_REVIEW',
+        date: now.toISOString(),
+        publicationDate: extractedPubDate,
+        week: getWeekNumber(refDate), weekYear: getWeekYear(refDate),
+        month: refDate.toLocaleString('fr-FR', { month: 'long', year: 'numeric' }),
+        favorite: false, summary: '', keyPoints: [],
+        fromPaste: true, updatedAt: now.toISOString()
       };
 
       // Générer résumé Mistral
@@ -2385,26 +2228,23 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
       articleData.title     = articleData.titleFr;
       articleData.summary   = result.summary   || '';
       articleData.keyPoints = result.keyPoints || [];
+      articleData.defenseTable = result.defenseTable || null;
       if (result.domain) articleData.domain = result.domain;
       if (!articleData.domain) articleData.domain = detectDomain(articleData.titleFr + ' ' + articleData.summary);
       if (!articleData.publicationDate && result.publicationDate) {
-        try { const d = new Date(result.publicationDate); if (!isNaN(d.getTime()) && d.getFullYear() > 2000) { articleData.publicationDate = d.toISOString(); articleData.week = getWeekNumber(d); articleData.weekYear = getWeekYear(d); } } catch(e) {}
+        try {
+          const d = new Date(result.publicationDate);
+          if (!isNaN(d.getTime()) && d.getFullYear() > 2000 && d.getFullYear() <= new Date().getFullYear() + 1) {
+            articleData.publicationDate = d.toISOString();
+            articleData.week    = getWeekNumber(d);
+            articleData.weekYear = getWeekYear(d);
+          }
+        } catch(e) {}
       }
 
-      // Vérification doublon contenu
-      const dup = findDuplicate(articleData);
-      if (dup) {
-        articleData.status = 'DUPLICATE_SUSPECTED';
-        state.currentDuplicateCheck = { new: articleData, existing: dup.article, score: dup.score };
-      } else {
-        articleData.status = 'PENDING_REVIEW';
-      }
-
-      state.articles.push(articleData);
-      added++;
+      newArticles.push(articleData);
       done++;
-      saveToStorage();
-      await new Promise(r => setTimeout(r, 800)); // rate limit Mistral
+      await new Promise(r => setTimeout(r, 800));
 
     } catch(e) {
       console.warn('Paste article error:', url, e.message);
@@ -2412,14 +2252,35 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
     }
   }
 
+  // Vérifier les doublons de contenu parmi les nouveaux articles
+  for (const articleData of newArticles) {
+    const dup = findDuplicate(articleData);
+    if (dup) {
+      articleData.status = 'DUPLICATE_SUSPECTED';
+      state.currentDuplicateCheck = { new: articleData, existing: dup.article, score: dup.score };
+    }
+    state.articles.push(articleData);
+  }
+
+  // UNE SEULE sauvegarde à la fin, SANS déclencher la sync immédiate
+  try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+  // Sync différée (la sync auto normale prendra le relai)
+  syncAfterChange();
+
   hideLoading();
+
+  const added = newArticles.length;
 
   // Afficher résultat
   resultEl.style.display = 'block';
-  resultEl.innerHTML = `<div class="import-info" style="background:var(--success-bg);border-color:rgba(52,211,153,0.3)">
-    <span>✅</span>
-    <span><strong>${added} article${added > 1 ? 's' : ''} IA ajouté${added > 1 ? 's' : ''}</strong> sur ${foundUrls.length} lien(s) détecté(s) (${aiUrls.length} lié${aiUrls.length > 1 ? 's' : ''} à l'IA). Retrouvez-les dans la file de validation.</span>
-  </div>`;
+  resultEl.innerHTML = added > 0
+    ? `<div class="import-info" style="background:var(--success-bg);border-color:rgba(52,211,153,0.3)">
+        <span>✅</span>
+        <span><strong>${added} article${added > 1 ? 's' : ''} IA ajouté${added > 1 ? 's' : ''}</strong> sur ${foundUrls.length} lien(s) détecté(s). <button class="btn-primary small" onclick="switchTab('validation')" style="margin-left:8px">→ Voir la file de validation</button></span>
+      </div>`
+    : `<div class="import-info" style="background:var(--warning-bg);border-color:rgba(251,191,36,0.3)">
+        <span>⚠</span><span>Tous les liens étaient déjà importés ou ont échoué.</span>
+      </div>`;
 
   renderSavedArticles();
   renderValidationQueue();
@@ -3109,37 +2970,18 @@ function renderRssTab() {
   renderRssStats();
 }
 
-// State for RSS feeds pagination
-let rssFeedsPage = 0;
-const RSS_FEEDS_PAGE_SIZE = 10;
-
-function renderRssFeedsList(page) {
+function renderRssFeedsList() {
   const container = document.getElementById('rss-feeds-list');
   const countEl = document.getElementById('rss-feeds-count');
   if (!container) return;
+  if (countEl) countEl.textContent = `${state.rssFeeds.length} flux`;
 
-  // Sort alphabetically by name
-  const sorted = [...state.rssFeeds].sort((a, b) =>
-    (a.name || a.url).localeCompare(b.name || b.url, 'fr', { sensitivity: 'base' })
-  );
-
-  if (countEl) countEl.textContent = `${sorted.length} flux`;
-
-  if (sorted.length === 0) {
+  if (state.rssFeeds.length === 0) {
     container.innerHTML = `<div class="empty-state"><div class="empty-icon">📡</div><p>Aucun flux RSS configuré</p><span>Ajoutez vos premiers flux ci-dessus</span></div>`;
-    rssFeedsPage = 0;
     return;
   }
 
-  if (page !== undefined) rssFeedsPage = page;
-  const totalPages = Math.ceil(sorted.length / RSS_FEEDS_PAGE_SIZE);
-  if (rssFeedsPage >= totalPages) rssFeedsPage = totalPages - 1;
-  if (rssFeedsPage < 0) rssFeedsPage = 0;
-
-  const start = rssFeedsPage * RSS_FEEDS_PAGE_SIZE;
-  const pageFeeds = sorted.slice(start, start + RSS_FEEDS_PAGE_SIZE);
-
-  const feedsHtml = pageFeeds.map(feed => `
+  container.innerHTML = state.rssFeeds.map(feed => `
     <div class="rss-feed-row ${feed.enabled ? '' : 'disabled'}">
       <div style="flex-shrink:0">
         <label class="toggle-switch">
@@ -3159,18 +3001,6 @@ function renderRssFeedsList(page) {
       </div>
     </div>
   `).join('');
-
-  const paginationHtml = totalPages > 1 ? `
-    <div class="rss-pagination" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0 4px;border-top:1px solid var(--navy-border);margin-top:8px">
-      <button class="btn-secondary small" onclick="renderRssFeedsList(${rssFeedsPage - 1})" ${rssFeedsPage === 0 ? 'disabled' : ''}>← Précédent</button>
-      <span style="font-size:12px;color:var(--text-muted)">
-        ${start + 1}–${Math.min(start + RSS_FEEDS_PAGE_SIZE, sorted.length)} sur ${sorted.length}
-      </span>
-      <button class="btn-secondary small" onclick="renderRssFeedsList(${rssFeedsPage + 1})" ${rssFeedsPage >= totalPages - 1 ? 'disabled' : ''}>Suivant →</button>
-    </div>
-  ` : '';
-
-  container.innerHTML = feedsHtml + paginationHtml;
 }
 
 function renderRssDetectedArticles() {
