@@ -789,7 +789,8 @@ function renderSavedArticles(page = 0) {
   savedArticlesPage = page;
   const domainFilter = document.getElementById('filter-domain')?.value || '';
   const statusFilter = document.getElementById('filter-status')?.value || '';
-  let articles = state.articles.filter(a => a.status !== 'REJECTED');
+  // Affiche tous les articles sauf REJECTED et CAPITALISED
+  let articles = state.articles.filter(a => a.status !== 'REJECTED' && a.status !== 'CAPITALISED');
   if (domainFilter) articles = articles.filter(a => a.domain === domainFilter);
   if (statusFilter) articles = articles.filter(a => a.status === statusFilter);
 
@@ -2164,14 +2165,16 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
   for (const url of aiUrls) {
     showLoading(`Résumé ${done + 1} / ${aiUrls.length} : ${url.substring(0, 60)}...`);
     try {
-      // Vérifier doublon URL (inclure les articles déjà ajoutés dans cette session)
-      const existingUrls = new Set([
-        ...state.articles.map(a => normalizeUrl(a.url)),
-        ...newArticles.map(a => normalizeUrl(a.url))
-      ]);
-      if (existingUrls.has(normalizeUrl(url))) {
-        done++;
-        continue;
+      // Vérifier doublon URL uniquement dans les articles déjà en base + ceux déjà ajoutés dans cette session
+      if (url) {
+        const normalizedNew = normalizeUrl(url);
+        const alreadyExists = state.articles.some(a => a.url && normalizeUrl(a.url) === normalizedNew)
+          || newArticles.some(a => a.url && normalizeUrl(a.url) === normalizedNew);
+        if (alreadyExists) {
+          console.log('[PASTE] URL déjà importée, ignorée :', url.substring(0, 60));
+          done++;
+          continue;
+        }
       }
 
       // Récupérer contenu de la page
@@ -2252,13 +2255,17 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
     }
   }
 
-  // Vérifier les doublons de contenu parmi les nouveaux articles
+  // Vérifier les doublons de contenu uniquement contre les articles DÉJÀ dans state
+  // (pas contre les autres nouveaux articles de cette session pour éviter les faux positifs)
   for (const articleData of newArticles) {
+    // findDuplicate cherche dans state.articles — les nouveaux n'y sont pas encore, pas de risque
     const dup = findDuplicate(articleData);
     if (dup) {
       articleData.status = 'DUPLICATE_SUSPECTED';
+      // On garde seulement le dernier doublon détecté pour la modale
       state.currentDuplicateCheck = { new: articleData, existing: dup.article, score: dup.score };
     }
+    // statut PENDING_REVIEW par défaut déjà assigné lors de la création
     state.articles.push(articleData);
   }
 
