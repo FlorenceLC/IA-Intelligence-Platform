@@ -122,7 +122,7 @@ function switchTab(tab) {
   if (tab === 'analyse') renderAnalyse();
   if (tab === 'settings') { renderSettings(); renderGistSettings(); }
   if (tab === 'rss') renderRssTab();
-  if (tab === 'export') renderNewsletterWeekSelector();
+  if (tab === 'export') { renderNewsletterWeekSelector(); renderConfluenceWeekSelector(); }
 }
 
 // ============ IMPORT ============
@@ -615,9 +615,8 @@ function unvalidateArticle(id) {
 function capitaliseArticle(id) {
   const article = state.articles.find(a => a.id === id);
   if (!article) return;
-  article.status = 'CAPITALISED';
-  article.capitalisedAt = new Date().toISOString();
-  // Retirer du DOM immédiatement sans attendre le re-render
+
+  // Animation de disparition immédiate
   const card = document.getElementById(`veille-card-${id}`);
   if (card) {
     card.style.transition = 'opacity 0.3s, transform 0.3s';
@@ -625,9 +624,18 @@ function capitaliseArticle(id) {
     card.style.transform = 'translateX(20px)';
     setTimeout(() => { card.remove(); }, 300);
   }
-  saveToStorage();
+
+  // Suppression définitive de la base (pas juste un changement de statut)
+  state.articles = state.articles.filter(a => a.id !== id);
+
+  // Push immédiat vers Gist pour répercuter sur tous les appareils
+  _pushToSupabase();
+
+  // Sauvegarde locale immédiate
+  try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+
   updateStats();
-  showToast('✓ Article capitalisé — masqué de la veille', 'success');
+  showToast('✓ Article capitalisé et supprimé définitivement', 'success');
 }
 
 function deleteArticleFromVeille(id) {
@@ -1138,6 +1146,65 @@ async function regenerateDefenseTable(id, btnEl) {
 function renderVeille() {
   renderVeilleFeatured();
   renderVeilleDomains();
+  // Mettre à jour le compteur
+  const countEl = document.getElementById('veille-validated-count');
+  if (countEl) countEl.textContent = state.articles.filter(a => a.status === 'VALIDATED').length;
+}
+
+// Générer les résumés manquants des articles validés dans la veille
+async function forceGenerateVeilleSummaries(btnEl) {
+  if (!state.settings.mistralKey) {
+    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
+    return;
+  }
+  // Articles validés sans résumé
+  const missing = state.articles.filter(a =>
+    a.status === 'VALIDATED' && (!a.summary || a.summary.trim() === '')
+  );
+  if (missing.length === 0) {
+    showToast('ℹ Tous les articles validés ont déjà un résumé', 'info');
+    return;
+  }
+
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = `⏳ 0 / ${missing.length}...`; }
+
+  let done = 0;
+  for (const article of missing) {
+    try {
+      if (btnEl) btnEl.textContent = `⏳ ${done + 1} / ${missing.length}...`;
+      const result = await generateSummaryWithMistral(article);
+      article.titleFr      = result.titleFr   || article.title;
+      article.title        = article.titleFr;
+      article.summary      = result.summary   || '';
+      article.keyPoints    = result.keyPoints || [];
+      article.defenseTable = result.defenseTable || null;
+      if (result.domain) article.domain = result.domain;
+      if (result.publicationDate && !article.publicationDate) {
+        try {
+          const d = new Date(result.publicationDate);
+          if (!isNaN(d.getTime()) && d.getFullYear() > 2000) {
+            article.publicationDate = d.toISOString();
+            article.week    = getWeekNumber(d);
+            article.weekYear = getWeekYear(d);
+          }
+        } catch(e) {}
+      }
+      article.updatedAt = new Date().toISOString();
+      done++;
+      try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+      await new Promise(r => setTimeout(r, 1000));
+    } catch(e) {
+      console.warn('Veille summary error:', article.title, e.message);
+      if (e.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
+      done++;
+    }
+  }
+
+  if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+  syncAfterChange();
+  renderVeille();
+  showToast(`✅ ${done} résumé${done > 1 ? 's' : ''} généré${done > 1 ? 's' : ''}`, 'success');
 }
 
 function renderVeilleIfActive() {
@@ -1704,39 +1771,66 @@ function createMessageHTML(role, content) {
 }
 
 // ============ EXPORT ============
+// ── Sélecteur de semaines pour Confluence (même logique que newsletter) ──
+function renderConfluenceWeekSelector() {
+  const validated = state.articles.filter(a => a.status === 'VALIDATED');
+  const wMap = {};
+  for (const a of validated) {
+    const key = weekKey(a);
+    if (!wMap[key]) wMap[key] = { label: weekLabel(a), count: 0 };
+    wMap[key].count++;
+  }
+  const weeks = Object.entries(wMap).sort((a, b) => b[0].localeCompare(a[0]));
+  const container = document.getElementById('confluence-weeks-container');
+  if (!container) return;
+  if (weeks.length === 0) {
+    container.innerHTML = `<div style="color:var(--text-muted);font-size:12px">Aucun article validé</div>`;
+    return;
+  }
+  container.innerHTML = weeks.map(([key, { label, count }]) => `
+    <label class="checkbox-item">
+      <input type="checkbox" value="${key}" class="confluence-week-cb" ${count > 0 ? 'checked' : ''}>
+      ${label} <span style="color:var(--text-muted);font-size:11px">(${count} article${count > 1 ? 's' : ''})</span>
+    </label>
+  `).join('');
+}
+
 function exportConfluence() {
-  const period = document.getElementById('export-period').value;
+  const selectedKeys  = [...document.querySelectorAll('.confluence-week-cb:checked')].map(i => i.value);
   const selectedDomains = [...document.querySelectorAll('#export-domains input:checked')].map(i => i.value);
 
-  let articles = state.articles.filter(a => a.status === 'VALIDATED' && selectedDomains.includes(a.domain));
-
-  if (period === 'week') {
-    const w = getWeekNumber(new Date()); const y = getWeekYear(new Date());
-    articles = articles.filter(a => a.week === w && (a.weekYear || y) === y);
-  } else if (period === 'month') {
-    const thisMonth = new Date().toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
-    articles = articles.filter(a => a.month === thisMonth);
-  }
-
-  if (articles.length === 0) {
-    showToast('⚠ Aucun article pour cette période / ces domaines', 'warning');
+  if (selectedKeys.length === 0) {
+    showToast('⚠ Sélectionnez au moins une semaine', 'warning');
     return;
   }
 
+  let articles = state.articles.filter(a =>
+    a.status === 'VALIDATED' &&
+    selectedDomains.includes(a.domain) &&
+    selectedKeys.includes(weekKey(a))
+  );
+
+  if (articles.length === 0) {
+    showToast('⚠ Aucun article pour la sélection', 'warning');
+    return;
+  }
+
+  // Même format que les résumés dans l'onglet Veille :
+  // ### Titre (h3), lien | date, résumé, **Informations importantes :**, • points
   let output = `Veille Stratégique IA\n`;
   output += `Généré le ${new Date().toLocaleDateString('fr-FR')}\n`;
   output += '═'.repeat(60) + '\n\n';
 
-  // ── Articles à la une ──
   const featured = articles.filter(a => a.favorite);
   if (featured.length > 0) {
     output += `⭐ Articles à la une\n\n`;
-    featured.forEach(a => { output += formatArticleNewsletter(a); });
+    featured.forEach(a => { output += formatArticleConfluence(a); });
     output += '─'.repeat(60) + '\n\n';
   }
 
-  // ── Par domaine, par semaine, résumés complets ──
   const domains = Object.keys(DOMAIN_ICONS);
+  const sortedKeys = [...selectedKeys].sort((a, b) => a.localeCompare(b));
+
   for (const domain of domains) {
     const domainArts = articles.filter(a => a.domain === domain);
     if (domainArts.length === 0) continue;
@@ -1744,22 +1838,32 @@ function exportConfluence() {
     output += `${DOMAIN_ICONS[domain]} ${domain}\n`;
     output += '─'.repeat(40) + '\n\n';
 
-    // Group by week, most recent first
-    const byWeek = {};
-    domainArts.forEach(a => {
-      const key = weekKey(a);
-      if (!byWeek[key]) byWeek[key] = [];
-      byWeek[key].push(a);
-    });
-    const sortedWeeks = Object.entries(byWeek).sort((a, b) => b[0].localeCompare(a[0]));
-
-    for (const [key, arts] of sortedWeeks) {
+    for (const key of sortedKeys) {
+      const arts = domainArts.filter(a => weekKey(a) === key);
+      if (arts.length === 0) continue;
       output += `${weekMap_label(key)} :\n\n`;
-      arts.forEach(a => { output += formatArticleNewsletter(a); });
+      arts.forEach(a => { output += formatArticleConfluence(a); });
     }
   }
 
   showExportPreview(output);
+}
+
+// Format résumé complet style Veille : ### Titre, lien | date, résumé, **Informations importantes :**, • points
+function formatArticleConfluence(a) {
+  const dateLabel = publicationDateLabel(a, false);
+  const linkLine  = a.url ? `🔗 Lire en ligne | ${dateLabel}` : dateLabel;
+  const points    = (a.keyPoints || []).map(p => `• ${p}`).join('\n');
+
+  let block = '';
+  block += `### ${a.titleFr || a.title}\n`;
+  block += `${linkLine}\n\n`;
+  block += `${a.summary || ''}\n\n`;
+  if (points) {
+    block += `**Informations importantes :**\n${points}\n`;
+  }
+  block += '\n';
+  return block;
 }
 
 function renderNewsletterWeekSelector() {
@@ -2642,15 +2746,25 @@ async function fetchAllFeeds(showUI = true) {
       const items = await fetchRssFeed(feed.url);
       const aiItems = items.filter(item => isAiRelated(item.title + ' ' + item.description));
 
-      // Filter already imported URLs
-      const existingUrls = new Set(state.articles.map(a => a.url));
-      const newItems = aiItems.filter(item => item.link && !existingUrls.has(item.link));
+      // Filter already imported URLs — inclure TOUS les articles même capitalisés/rejetés
+      // pour éviter de réimporter des articles déjà traités
+      const existingUrls = new Set(
+        state.articles
+          .filter(a => a.url)
+          .map(a => normalizeUrl(a.url))
+      );
+      const newItems = aiItems.filter(item =>
+        item.link && !existingUrls.has(normalizeUrl(item.link))
+      );
 
       feed.articlesFound = aiItems.length;
       feed.lastFetch = new Date().toISOString();
 
-      for (const item of newItems.slice(0, 5)) { // max 5 per feed per scan
-        const pubD = item.pubDate ? (() => { try { const d = new Date(item.pubDate); return isNaN(d.getTime()) ? null : d; } catch(e) { return null; } })() : null;
+      for (const item of newItems.slice(0, 5)) {
+        const pubD = item.pubDate ? (() => {
+          try { const d = new Date(item.pubDate); return isNaN(d.getTime()) ? null : d; }
+          catch(e) { return null; }
+        })() : null;
         const refDate = pubD || new Date();
         const article = {
           id: generateId(),
@@ -2669,15 +2783,18 @@ async function fetchAllFeeds(showUI = true) {
           summary: '',
           keyPoints: [],
           fromRss: true,
-          rssSource: feed.name
+          rssSource: feed.name,
+          updatedAt: new Date().toISOString()
         };
 
-        // Duplicate check before adding
+        // Vérification doublon de contenu (titre/résumé similaire)
         const dup = findDuplicate(article);
-        if (!dup) {
-          state.articles.push(article);
-          totalNew++;
+        if (dup) {
+          article.status = 'DUPLICATE_SUSPECTED';
+          state.currentDuplicateCheck = { new: article, existing: dup.article, score: dup.score };
         }
+        state.articles.push(article);
+        totalNew++;
       }
 
     } catch(err) {
@@ -2977,18 +3094,39 @@ function renderRssTab() {
   renderRssStats();
 }
 
-function renderRssFeedsList() {
-  const container = document.getElementById('rss-feeds-list');
-  const countEl = document.getElementById('rss-feeds-count');
-  if (!container) return;
-  if (countEl) countEl.textContent = `${state.rssFeeds.length} flux`;
+let rssFeedsPage = 0;
+const RSS_FEEDS_PER_PAGE = 10;
 
-  if (state.rssFeeds.length === 0) {
+function renderRssFeedsList(page = 0) {
+  rssFeedsPage = page;
+  const container = document.getElementById('rss-feeds-list');
+  const countEl   = document.getElementById('rss-feeds-count');
+  if (!container) return;
+
+  // Tri alphabétique par nom
+  const sorted = [...state.rssFeeds].sort((a, b) =>
+    (a.name || a.url).localeCompare(b.name || b.url, 'fr', { sensitivity: 'base' })
+  );
+
+  if (countEl) countEl.textContent = `${sorted.length} flux`;
+
+  if (sorted.length === 0) {
     container.innerHTML = `<div class="empty-state"><div class="empty-icon">📡</div><p>Aucun flux RSS configuré</p><span>Ajoutez vos premiers flux ci-dessus</span></div>`;
     return;
   }
 
-  container.innerHTML = state.rssFeeds.map(feed => `
+  const totalPages = Math.ceil(sorted.length / RSS_FEEDS_PER_PAGE);
+  const paginated  = sorted.slice(page * RSS_FEEDS_PER_PAGE, (page + 1) * RSS_FEEDS_PER_PAGE);
+
+  const pagination = totalPages > 1 ? `
+    <div class="pagination" style="padding:10px 0 4px">
+      <button class="btn-secondary small" onclick="renderRssFeedsList(${page - 1})" ${page === 0 ? 'disabled' : ''}>← Préc.</button>
+      <span class="page-info">${page + 1} / ${totalPages} <span style="color:var(--text-muted)">(${sorted.length} flux)</span></span>
+      <button class="btn-secondary small" onclick="renderRssFeedsList(${page + 1})" ${page >= totalPages - 1 ? 'disabled' : ''}>Suiv. →</button>
+    </div>
+  ` : '';
+
+  container.innerHTML = pagination + paginated.map(feed => `
     <div class="rss-feed-row ${feed.enabled ? '' : 'disabled'}">
       <div style="flex-shrink:0">
         <label class="toggle-switch">
@@ -3002,12 +3140,12 @@ function renderRssFeedsList() {
       </div>
       <div class="rss-feed-meta">
         ${feed.articlesFound > 0 ? `<span class="rss-count-badge">${feed.articlesFound} IA</span>` : ''}
-        ${feed.lastFetch ? `<span class="rss-last-fetch">Scanné ${formatDate(feed.lastFetch)}</span>` : `<span class="rss-last-fetch">Jamais scanné</span>`}
+        <span class="rss-last-fetch">${feed.lastFetch ? 'Scanné ' + formatDate(feed.lastFetch) : 'Jamais scanné'}</span>
         <button class="action-btn" onclick="testFeedUrl('${feed.id}')" title="Tester">🔌</button>
         <button class="action-btn" onclick="removeRssFeed('${feed.id}')" title="Supprimer">🗑</button>
       </div>
     </div>
-  `).join('');
+  `).join('') + (totalPages > 1 ? pagination : '');
 }
 
 function renderRssDetectedArticles() {

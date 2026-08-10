@@ -265,6 +265,18 @@
   <section class="tab-content" id="tab-veille">
     <div class="veille-layout">
 
+      <!-- Barre d'actions Veille -->
+      <div class="card full-width" style="padding:14px 20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+          <span style="font-size:13px;color:var(--text-secondary)">
+            <strong id="veille-validated-count" style="color:var(--beige)">0</strong> articles validés
+          </span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-secondary small" onclick="forceGenerateVeilleSummaries(this)">🤖 Générer résumés manquants</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Articles à la une dans veille -->
       <div class="card full-width veille-featured">
         <div class="card-header">
@@ -389,12 +401,10 @@
         </div>
         <div class="export-options">
           <div class="form-group">
-            <label>Période</label>
-            <select id="export-period" class="input-field">
-              <option value="week">Semaine courante</option>
-              <option value="month">Mois courant</option>
-              <option value="all">Tout</option>
-            </select>
+            <label>Semaines à inclure</label>
+            <div class="checkbox-group" id="confluence-weeks-container">
+              <div style="color:var(--text-muted);font-size:12px">Chargement...</div>
+            </div>
           </div>
           <div class="form-group">
             <label>Domaines</label>
