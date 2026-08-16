@@ -928,7 +928,7 @@ function buildArticleDetail(a) {
         <h3 style="flex:1">${escHtml(a.titleFr || a.title)}</h3>
         <button class="btn-secondary small" onclick="copyArticleSummary('${a.id}', this)" title="Copier le résumé" style="flex-shrink:0">📋 Copier</button>
       </div>
-      ${a.url ? `<p style="margin:6px 0 4px"><a href="${escHtml(a.url)}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a> <span style="color:var(--text-muted);font-size:12px">| ${dateLabel}</span></p>` : `<p style="margin:6px 0 4px;color:var(--text-muted);font-size:12px">${dateLabel}</p>`}
+      ${(a.url || (a.extraUrls && a.extraUrls.length > 0)) ? `<p style="margin:6px 0 4px">${renderArticleLinksHtml(a)} <span style="color:var(--text-muted);font-size:12px">| ${dateLabel}</span></p>` : `<p style="margin:6px 0 4px;color:var(--text-muted);font-size:12px">${dateLabel}</p>`}
       <button class="action-btn" onclick="toggleDateEdit('${a.id}')" title="Modifier la date" style="font-size:11px;margin-bottom:10px">✏ Modifier la date</button>
       <div id="date-edit-${a.id}" style="display:none;margin-bottom:14px;padding:10px;background:var(--navy);border:1px solid var(--navy-border);border-radius:8px">
         <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Date de publication réelle</label>
@@ -1010,15 +1010,28 @@ function buildArticleDetail(a) {
   return summaryBlock + defenseTableHtml + metaSection;
 }
 
-// ── Copier le résumé complet (titre, lien, date, résumé, points clés) ──
+// ── Helper : affiche un ou plusieurs liens d'un article ──
+function renderArticleLinksHtml(a) {
+  const urls = [a.url, ...(a.extraUrls || [])].filter(Boolean);
+  if (urls.length === 0) return '';
+  if (urls.length === 1) return `<a href="${escHtml(urls[0])}" target="_blank" style="color:var(--accent)">🔗 Lire en ligne</a>`;
+  return urls.map((url, i) => `<a href="${escHtml(url)}" target="_blank" style="color:var(--accent)">🔗 Lien ${i + 1}</a>`).join(' &nbsp;·&nbsp; ');
+}
+
+function renderArticleLinksText(a) {
+  const urls = [a.url, ...(a.extraUrls || [])].filter(Boolean);
+  if (urls.length === 0) return '';
+  if (urls.length === 1) return `🔗 Lire en ligne : ${urls[0]}`;
+  return urls.map((url, i) => `🔗 Lien ${i + 1} : ${url}`).join('\n');
+}
 function copyArticleSummary(id, btnEl) {
   const a = state.articles.find(x => x.id === id);
   if (!a) return;
   const dateLabel = publicationDateLabel(a, false);
 
-  // ── Version texte brut (fallback) ──
+  const linksText = renderArticleLinksText(a);
   let plainText = `${a.titleFr || a.title}\n`;
-  if (a.url) plainText += `🔗 Lire en ligne | ${dateLabel}\n\n`;
+  if (linksText) plainText += `${linksText} | ${dateLabel}\n\n`;
   else plainText += `${dateLabel}\n\n`;
   plainText += `${a.summary || ''}\n\n`;
   if (a.keyPoints && a.keyPoints.length > 0) {
@@ -1027,8 +1040,8 @@ function copyArticleSummary(id, btnEl) {
   }
 
   // ── Version HTML riche : titre en h3, "Informations importantes" en gras, vraie liste à puces ──
-  const linkLine = a.url
-    ? `<a href="${escHtml(a.url)}">🔗 Lire en ligne</a> | ${escHtml(dateLabel)}`
+  const linkLine = (a.url || (a.extraUrls && a.extraUrls.length > 0))
+    ? `${renderArticleLinksHtml(a)} | ${escHtml(dateLabel)}`
     : escHtml(dateLabel);
   const pointsHtml = (a.keyPoints && a.keyPoints.length > 0)
     ? `<p><strong>Informations importantes :</strong></p><ul>${a.keyPoints.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
@@ -1151,7 +1164,101 @@ function renderVeille() {
   if (countEl) countEl.textContent = state.articles.filter(a => a.status === 'VALIDATED').length;
 }
 
-// Générer les résumés manquants des articles validés dans la veille
+// Détecte et fusionne automatiquement les doublons parmi les articles validés
+// - Fusionne les résumés et les points clés
+// - Consolide tous les liens sous forme "🔗 Lien 1, Lien 2, ..."
+async function detectAndMergeVeilleDuplicates(btnEl) {
+  const validated = state.articles.filter(a => a.status === 'VALIDATED');
+  if (validated.length < 2) {
+    showToast('ℹ Pas assez d\'articles pour détecter des doublons', 'info');
+    return;
+  }
+
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Analyse...'; }
+
+  const threshold  = state.settings.duplicateThreshold / 100;
+  const toDelete   = new Set();
+  const toUpdate   = new Map(); // id → article fusionné
+  let mergeCount   = 0;
+
+  for (let i = 0; i < validated.length; i++) {
+    if (toDelete.has(validated[i].id)) continue;
+
+    for (let j = i + 1; j < validated.length; j++) {
+      if (toDelete.has(validated[j].id)) continue;
+
+      const score = computeSimilarity(validated[i], validated[j]);
+      if (score < threshold) continue;
+
+      // Doublon détecté → fusionner j dans i
+      const base  = toUpdate.get(validated[i].id) || { ...validated[i] };
+      const other = validated[j];
+
+      // Consolider les URLs — format : liens séparés
+      const baseUrls  = base._allUrls  || (base.url  ? [base.url]  : []);
+      const otherUrls = other._allUrls || (other.url ? [other.url] : []);
+      const allUrls   = [...new Set([...baseUrls, ...otherUrls])].filter(Boolean);
+      base._allUrls   = allUrls;
+      base.url        = allUrls[0] || '';
+
+      // Fusionner les points clés (dédupliqués, max 10)
+      const combined = [...(base.keyPoints || []), ...(other.keyPoints || [])];
+      base.keyPoints = [...new Map(combined.map(p => [p.replace(/^[^\w]+/, '').substring(0, 40), p])).values()].slice(0, 10);
+
+      // Garder le meilleur résumé (le plus long)
+      if ((other.summary || '').length > (base.summary || '').length) {
+        base.summary = other.summary;
+      }
+
+      // Date de publication la plus ancienne
+      if (other.publicationDate && (!base.publicationDate || other.publicationDate < base.publicationDate)) {
+        base.publicationDate = other.publicationDate;
+        base.week     = getWeekNumber(new Date(other.publicationDate));
+        base.weekYear = getWeekYear(new Date(other.publicationDate));
+        base.month    = new Date(other.publicationDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
+      }
+
+      base.updatedAt = new Date().toISOString();
+      toUpdate.set(base.id, base);
+      toDelete.add(other.id);
+      mergeCount++;
+    }
+  }
+
+  if (mergeCount === 0) {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+    showToast('ℹ Aucun doublon détecté avec le seuil actuel', 'info');
+    return;
+  }
+
+  // Appliquer les fusions : mettre à jour les articles fusionnés
+  for (const [id, merged] of toUpdate) {
+    // Formater le champ URL final avec tous les liens
+    if (merged._allUrls && merged._allUrls.length > 1) {
+      merged.url = merged._allUrls[0]; // URL principale = premier lien
+      // Stocker tous les liens pour l'affichage
+      merged.extraUrls = merged._allUrls.slice(1);
+    }
+    delete merged._allUrls;
+    const idx = state.articles.findIndex(a => a.id === id);
+    if (idx !== -1) state.articles[idx] = merged;
+  }
+
+  // Supprimer les doublons absorbés
+  state.articles = state.articles.filter(a => !toDelete.has(a.id));
+
+  // Push immédiat (suppression définitive)
+  try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
+  _pushToSupabase();
+
+  if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+
+  renderVeille();
+  renderSavedArticles();
+  updateStats();
+  showToast(`🔁 ${mergeCount} doublon${mergeCount > 1 ? 's' : ''} fusionné${mergeCount > 1 ? 's' : ''} — ${toDelete.size} article${toDelete.size > 1 ? 's' : ''} supprimé${toDelete.size > 1 ? 's' : ''}`, 'success');
+}
 async function forceGenerateVeilleSummaries(btnEl) {
   if (!state.settings.mistralKey) {
     showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
@@ -1771,7 +1878,7 @@ function createMessageHTML(role, content) {
 }
 
 // ============ EXPORT ============
-// ── Sélecteur de semaines pour Confluence (même logique que newsletter) ──
+// ── Sélecteur de semaines pour Confluence ──
 function renderConfluenceWeekSelector() {
   const validated = state.articles.filter(a => a.status === 'VALIDATED');
   const wMap = {};
@@ -1789,20 +1896,17 @@ function renderConfluenceWeekSelector() {
   }
   container.innerHTML = weeks.map(([key, { label, count }]) => `
     <label class="checkbox-item">
-      <input type="checkbox" value="${key}" class="confluence-week-cb" ${count > 0 ? 'checked' : ''}>
+      <input type="checkbox" value="${key}" class="confluence-week-cb" checked>
       ${label} <span style="color:var(--text-muted);font-size:11px">(${count} article${count > 1 ? 's' : ''})</span>
     </label>
   `).join('');
 }
 
 function exportConfluence() {
-  const selectedKeys  = [...document.querySelectorAll('.confluence-week-cb:checked')].map(i => i.value);
+  const selectedKeys    = [...document.querySelectorAll('.confluence-week-cb:checked')].map(i => i.value);
   const selectedDomains = [...document.querySelectorAll('#export-domains input:checked')].map(i => i.value);
 
-  if (selectedKeys.length === 0) {
-    showToast('⚠ Sélectionnez au moins une semaine', 'warning');
-    return;
-  }
+  if (selectedKeys.length === 0) { showToast('⚠ Sélectionnez au moins une semaine', 'warning'); return; }
 
   let articles = state.articles.filter(a =>
     a.status === 'VALIDATED' &&
@@ -1810,60 +1914,109 @@ function exportConfluence() {
     selectedKeys.includes(weekKey(a))
   );
 
-  if (articles.length === 0) {
-    showToast('⚠ Aucun article pour la sélection', 'warning');
-    return;
-  }
+  if (articles.length === 0) { showToast('⚠ Aucun article pour la sélection', 'warning'); return; }
 
-  // Même format que les résumés dans l'onglet Veille :
-  // ### Titre (h3), lien | date, résumé, **Informations importantes :**, • points
-  let output = `Veille Stratégique IA\n`;
-  output += `Généré le ${new Date().toLocaleDateString('fr-FR')}\n`;
-  output += '═'.repeat(60) + '\n\n';
+  const sortedKeys = [...selectedKeys].sort((a, b) => a.localeCompare(b));
+  const domains    = Object.keys(DOMAIN_ICONS);
 
+  // ── Construire le HTML riche (pour clipboard + prévisualisation) ──
+  let html = `<h2>Veille Stratégique IA</h2>`;
+  html += `<p><em>Généré le ${new Date().toLocaleDateString('fr-FR')}</em></p><hr>`;
+
+  // Articles à la une
   const featured = articles.filter(a => a.favorite);
   if (featured.length > 0) {
-    output += `⭐ Articles à la une\n\n`;
-    featured.forEach(a => { output += formatArticleConfluence(a); });
-    output += '─'.repeat(60) + '\n\n';
+    html += `<h2>⭐ Articles à la une</h2>`;
+    featured.forEach(a => { html += articleToHtmlBlock(a); });
+    html += `<hr>`;
   }
 
-  const domains = Object.keys(DOMAIN_ICONS);
-  const sortedKeys = [...selectedKeys].sort((a, b) => a.localeCompare(b));
-
+  // Par domaine → par semaine
   for (const domain of domains) {
     const domainArts = articles.filter(a => a.domain === domain);
     if (domainArts.length === 0) continue;
 
-    output += `${DOMAIN_ICONS[domain]} ${domain}\n`;
-    output += '─'.repeat(40) + '\n\n';
+    html += `<h2>${DOMAIN_ICONS[domain]} ${domain}</h2>`;
 
     for (const key of sortedKeys) {
       const arts = domainArts.filter(a => weekKey(a) === key);
       if (arts.length === 0) continue;
-      output += `${weekMap_label(key)} :\n\n`;
-      arts.forEach(a => { output += formatArticleConfluence(a); });
+      html += `<h3 style="color:#888;font-size:13px;text-transform:uppercase;letter-spacing:1px">${weekMap_label(key)}</h3>`;
+      arts.forEach(a => { html += articleToHtmlBlock(a); });
     }
   }
 
-  showExportPreview(output);
+  showExportPreviewHtml(html);
 }
 
-// Format résumé complet style Veille : ### Titre, lien | date, résumé, **Informations importantes :**, • points
-function formatArticleConfluence(a) {
+function articleToHtmlBlock(a) {
   const dateLabel = publicationDateLabel(a, false);
-  const linkLine  = a.url ? `🔗 Lire en ligne | ${dateLabel}` : dateLabel;
-  const points    = (a.keyPoints || []).map(p => `• ${p}`).join('\n');
+  const hasLinks  = a.url || (a.extraUrls && a.extraUrls.length > 0);
+  const linkHtml  = hasLinks
+    ? `${renderArticleLinksHtml(a)} | ${escHtml(dateLabel)}`
+    : escHtml(dateLabel);
 
-  let block = '';
-  block += `### ${a.titleFr || a.title}\n`;
-  block += `${linkLine}\n\n`;
-  block += `${a.summary || ''}\n\n`;
-  if (points) {
-    block += `**Informations importantes :**\n${points}\n`;
+  const pointsHtml = (a.keyPoints && a.keyPoints.length > 0)
+    ? `<p><strong>Informations importantes :</strong></p><ul>${a.keyPoints.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
+    : '';
+
+  return `<h3>${escHtml(a.titleFr || a.title)}</h3><p>${linkHtml}</p><p>${escHtml(a.summary || '')}</p>${pointsHtml}`;
+}
+
+// Affiche le HTML rendu dans la prévisualisation et copie le HTML riche dans le presse-papier
+function showExportPreviewHtml(html) {
+  const preview = document.getElementById('export-preview');
+  const copyBtn = document.getElementById('copy-btn');
+
+  // Stocker le HTML brut pour la copie
+  preview.dataset.richHtml = html;
+  preview.dataset.raw = '';
+
+  // Afficher dans la prévisualisation (le HTML est déjà valide pour rendu)
+  preview.style.whiteSpace = 'normal';
+  preview.innerHTML = html;
+
+  // Styliser légèrement pour la preview dark
+  preview.querySelectorAll('h2').forEach(el => {
+    el.style.color = '#e8e4dc'; el.style.fontSize = '16px'; el.style.marginTop = '18px';
+  });
+  preview.querySelectorAll('h3').forEach(el => {
+    el.style.color = '#c8bfad'; el.style.fontSize = '14px'; el.style.marginTop = '14px';
+  });
+
+  if (copyBtn) { copyBtn.style.display = ''; copyBtn.textContent = '📋 Copier (formaté)'; }
+  showToast('✅ Export généré — cliquez Copier pour coller directement dans Confluence ou Gmail', 'success');
+}
+
+function showExportPreview(content) {
+  const preview = document.getElementById('export-preview');
+  const copyBtn = document.getElementById('copy-btn');
+  preview.dataset.raw = content;
+  preview.dataset.richHtml = '';
+  preview.style.whiteSpace = 'pre-wrap';
+  preview.innerHTML = escHtml(content);
+  if (copyBtn) { copyBtn.style.display = ''; copyBtn.textContent = '📋 Copier'; }
+  showToast('✅ Export généré — prêt à copier', 'success');
+}
+
+function copyExport() {
+  const preview  = document.getElementById('export-preview');
+  const richHtml = preview.dataset.richHtml;
+  const plain    = preview.dataset.raw || preview.innerText;
+
+  if (richHtml && navigator.clipboard && window.ClipboardItem) {
+    const blobHtml  = new Blob([richHtml], { type: 'text/html'  });
+    const blobPlain = new Blob([plain],    { type: 'text/plain' });
+    navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })])
+      .then(() => showToast('📋 Copié avec mise en forme — collez directement dans Confluence ou Gmail', 'success'))
+      .catch(() => {
+        navigator.clipboard.writeText(plain)
+          .then(() => showToast('📋 Copié (texte brut)', 'success'));
+      });
+  } else {
+    navigator.clipboard.writeText(plain)
+      .then(() => showToast('📋 Copié', 'success'));
   }
-  block += '\n';
-  return block;
 }
 
 function renderNewsletterWeekSelector() {
