@@ -2106,29 +2106,34 @@ function parseConfluenceSummary(text) {
 }
 
 function addMailSommaire() {
-  const textarea = document.getElementById('mail-sommaire-input');
-  const weekInput = document.getElementById('mail-sommaire-week');
-  const rawText = textarea?.value?.trim();
-  const weekLabel = weekInput?.value?.trim();
+  const textarea      = document.getElementById('mail-sommaire-input');
+  const weekInput     = document.getElementById('mail-sommaire-week');
+  const urlInput      = document.getElementById('mail-sommaire-url');
+  const titleInput    = document.getElementById('mail-sommaire-title');
+  const rawText       = textarea?.value?.trim();
+  const weekLabelVal  = weekInput?.value?.trim();
+  const confluenceUrl = urlInput?.value?.trim() || '';
+  const confluenceTitle = titleInput?.value?.trim() || '';
 
   if (!rawText) { showToast('⚠ Collez un sommaire Confluence', 'warning'); return; }
-  if (!weekLabel) { showToast('⚠ Indiquez le label de la semaine (ex: Semaine 33 — 2026)', 'warning'); return; }
+  if (!weekLabelVal) { showToast('⚠ Indiquez le label de la semaine (ex: Semaine 33 — 2026)', 'warning'); return; }
 
-  // Éviter les doublons
-  const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabel);
+  const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabelVal);
   const links = parseConfluenceSummary(rawText);
-  const entry = { weekLabel, rawText, links };
+  const entry = { weekLabel: weekLabelVal, rawText, links, confluenceUrl, confluenceTitle };
 
   if (existing >= 0) {
     mailSommaires[existing] = entry;
-    showToast(`🔄 Sommaire "${weekLabel}" mis à jour`, 'success');
+    showToast(`🔄 Sommaire "${weekLabelVal}" mis à jour`, 'success');
   } else {
     mailSommaires.push(entry);
-    showToast(`✅ Sommaire "${weekLabel}" ajouté`, 'success');
+    showToast(`✅ Sommaire "${weekLabelVal}" ajouté`, 'success');
   }
 
-  if (textarea) textarea.value = '';
-  if (weekInput) weekInput.value = '';
+  if (textarea)    textarea.value = '';
+  if (weekInput)   weekInput.value = '';
+  if (urlInput)    urlInput.value = '';
+  if (titleInput)  titleInput.value = '';
   renderMailSommairesList();
 }
 
@@ -2156,65 +2161,232 @@ function renderMailSommairesList() {
   `).join('');
 }
 
+// ── Catégories Veille Externe reconnues ──
+const MAIL_DOMAIN_ORDER = [
+  { key: 'Défense',       emoji: '⚔️',  label: 'Défense' },
+  { key: 'Civil',         emoji: '👨‍🔬', label: 'Civil' },
+  { key: 'Entreprise',    emoji: '🏭',  label: 'Entreprise' },
+  { key: 'Hardware',      emoji: '💻',  label: 'Hardware' },
+  { key: 'AI technologie',emoji: '📚',  label: 'IA : Techniques' },
+  { key: 'Robotique',     emoji: '🤖',  label: 'Robotique' },
+  { key: 'Juridique',     emoji: '⚖️',  label: 'Juridique' },
+];
+
+// Parse le texte brut d'un sommaire Confluence en items avec liens
+// Chaque item = { title, url, domain, isFavorite }
+function parseConfluenceSommaireStructured(text, weekLabel) {
+  const lines = text.split('\n');
+  const items = [];
+  let currentDomain = null;
+  let isFavorite = false;
+
+  const domainPatterns = [
+    { pattern: /défense/i,       key: 'Défense' },
+    { pattern: /civil/i,         key: 'Civil' },
+    { pattern: /entreprise/i,    key: 'Entreprise' },
+    { pattern: /hardware/i,      key: 'Hardware' },
+    { pattern: /ia.*tech|technique|technologie/i, key: 'AI technologie' },
+    { pattern: /robotique/i,     key: 'Robotique' },
+    { pattern: /juridique/i,     key: 'Juridique' },
+  ];
+  const favoritePatterns = /une|favori|à la une|featured/i;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Détecter les en-têtes de section (ligne sans lien HTTP ni puce article)
+    const hasUrl = /https?:\/\//.test(trimmed);
+    if (!hasUrl) {
+      // Chercher si c'est un label de domaine
+      let foundDomain = null;
+      for (const { pattern, key } of domainPatterns) {
+        if (pattern.test(trimmed)) { foundDomain = key; break; }
+      }
+      if (foundDomain) { currentDomain = foundDomain; continue; }
+      if (favoritePatterns.test(trimmed)) { isFavorite = true; currentDomain = null; continue; }
+      // Sinon ignorer (c'est probablement un en-tête générique)
+      continue;
+    }
+
+    // Extraire URL
+    const urlMatch = trimmed.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
+    const url = urlMatch ? urlMatch[0] : '';
+    // Titre = tout ce qui n'est pas l'URL ni les puces
+    const title = trimmed
+      .replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
+      .replace(/^[-•*·§\s]+/, '')
+      .replace(/[\[\]\(\)]/g, '')
+      .trim() || url;
+
+    if (title.length > 2 || url) {
+      items.push({ title, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
+    }
+  }
+  return items;
+}
+
 function generateMailFromSommaires() {
   if (mailSommaires.length === 0) {
     showToast('⚠ Ajoutez au moins un sommaire Confluence', 'warning');
     return;
   }
 
-  const sortedSommaires = [...mailSommaires].sort((a, b) => a.weekLabel.localeCompare(b.weekLabel));
-  const titleVal = document.getElementById('mail-newsletter-title')?.value?.trim() || 'Veille Stratégique IA';
+  const sorted = [...mailSommaires].sort((a, b) => a.weekLabel.localeCompare(b.weekLabel));
 
-  // ── Construire le HTML du mail riche ──
-  let html = `
-<div style="font-family:Arial,Helvetica,sans-serif;max-width:720px;color:#1a1a2e">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;border-radius:12px;overflow:hidden">
-    <tr>
-      <td style="padding:28px 32px 20px;background:linear-gradient(135deg,#1e293b,#0f172a);border-bottom:2px solid #334155">
-        <h1 style="margin:0;color:#e2d9c9;font-size:22px;font-weight:700;letter-spacing:-0.5px">${escHtml(titleVal)}</h1>
-        <p style="margin:8px 0 0;color:#94a3b8;font-size:13px">Généré le ${new Date().toLocaleDateString('fr-FR', { weekday:'long', day:'2-digit', month:'long', year:'numeric' })}</p>
-      </td>
-    </tr>
-    <tr>
-      <td style="padding:24px 32px">`;
+  // ── Parser tous les sommaires ──
+  const parsed = sorted.map(s => ({
+    weekLabel: s.weekLabel,
+    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel),
+    confluenceUrl: s.confluenceUrl || '',
+    confluenceTitle: s.confluenceTitle || `Veille IA — ${s.weekLabel} - Communauté Intelligence Artificielle – Confluence`,
+  }));
 
-  for (const sommaire of sortedSommaires) {
-    html += `
-        <div style="margin-bottom:28px">
-          <h2 style="margin:0 0 12px;color:#4a9eff;font-size:15px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;border-bottom:1px solid #1e3a5f;padding-bottom:8px">
-            📅 ${escHtml(sommaire.weekLabel)}
-          </h2>`;
+  // ── Builder HTML inline-styled pour Outlook ──
+  const F = 'font-family:Arial,Helvetica,sans-serif';
+  const C = 'color:#1f2937';
 
-    if (sommaire.links.length > 0) {
-      html += `<ul style="margin:0;padding:0 0 0 18px;list-style:disc">`;
-      for (const link of sommaire.links) {
-        if (link.url) {
-          html += `<li style="margin-bottom:6px;color:#c8bfad;font-size:14px;line-height:1.5"><a href="${escHtml(link.url)}" style="color:#4a9eff;text-decoration:none">${escHtml(link.title)}</a></li>`;
-        } else {
-          html += `<li style="margin-bottom:6px;color:#c8bfad;font-size:14px;line-height:1.5">${escHtml(link.title)}</li>`;
-        }
-      }
-      html += `</ul>`;
-    } else {
-      // Fallback : afficher le texte brut
-      html += `<pre style="white-space:pre-wrap;color:#c8bfad;font-size:13px;font-family:inherit;margin:0">${escHtml(sommaire.rawText)}</pre>`;
-    }
+  let body = `<div style="${F};${C};font-size:14px;line-height:1.7;max-width:740px">`;
 
-    html += `</div>`;
+  // ── Intro ──
+  body += `<p style="margin:0 0 6px">Bonjour à tous,</p>`;
+  body += `<p style="margin:0 0 14px">&nbsp;</p>`;
+
+  for (const s of parsed) {
+    const linkHtml = s.confluenceUrl
+      ? `<a href="${escHtml(s.confluenceUrl)}" style="color:#1155CC">${escHtml(s.confluenceTitle)}</a>`
+      : `<strong>${escHtml(s.confluenceTitle)}</strong>`;
+    body += `<p style="margin:0 0 4px">Vous trouverez la veille IA de la semaine … ici ${linkHtml}</p>`;
   }
 
-  html += `
-      </td>
-    </tr>
-    <tr>
-      <td style="padding:16px 32px;background:#0a1120;border-top:1px solid #1e293b;color:#4a5568;font-size:11px;text-align:center">
-        Veille Stratégique IA — IA Intelligence Platform
-      </td>
-    </tr>
-  </table>
-</div>`;
+  body += `<p style="margin:14px 0 4px">&nbsp;</p>`;
+  body += `<p style="margin:0 0 4px">Les produits défenses utilisant de l'IA identifiés dans la veille sont ici : <a href="https://forge-confluence-production.ns-sid.intra/pages/resumedraft.action?draftId=113445688&amp;draftShareId=b991a63c-0b1f-42c0-89cd-567926681115&amp;" style="color:#1155CC">Concurrence IA</a></p>`;
+  body += `<p style="margin:0 0 4px">N'hésitez pas à me proposer des compléments.</p>`;
+  body += `<p style="margin:14px 0 4px">&nbsp;</p>`;
+  body += `<p style="margin:0 0 4px"><strong>Au sommaire de ces semaines :</strong></p>`;
+  body += `<p style="margin:0 0 4px">⚠️<em>Le contenu de cette veille est en partie généré par IA.</em></p>`;
+  body += `<p style="margin:14px 0 4px">&nbsp;</p>`;
 
-  showExportPreviewHtml(html);
+  // ── § Veille Interne ──
+  body += `<p style="margin:0 0 4px"><strong>§&nbsp;&nbsp;🏭Veille Interne :</strong></p>`;
+  body += `<ul style="margin:4px 0 14px;padding-left:28px">`;
+  body += `<li style="margin-bottom:3px">🔒Blocage des sites permettant d'accéder aux GPT et les .ai en général.</li>`;
+  body += `<li style="margin-bottom:3px">Une solution d'IA générative chez KNDS&nbsp;?</li>`;
+  body += `<li style="margin-bottom:3px">Législation européenne et enjeux juridiques de l'IA</li>`;
+  body += `<li style="margin-bottom:3px">Nouvelle formation sur la sensibilisation IA disponible à tous</li>`;
+  body += `<li style="margin-bottom:3px">Concurrence et IA</li>`;
+  body += `</ul>`;
+
+  // ── § Articles à la une ──
+  body += `<p style="margin:0 0 4px"><strong>§&nbsp;&nbsp;🏆 Article(s) à la une :</strong></p>`;
+  for (const s of parsed) {
+    const featured = s.items.filter(i => i.isFavorite);
+    body += `<p style="margin:8px 0 2px"><strong>${escHtml(s.weekLabel)}</strong></p>`;
+    if (featured.length > 0) {
+      body += `<ul style="margin:2px 0 4px;padding-left:28px">`;
+      for (const item of featured) {
+        body += `<li style="margin-bottom:3px">`;
+        if (item.url) body += `<a href="${escHtml(item.url)}" style="color:#1155CC">${escHtml(item.title)}</a>`;
+        else body += escHtml(item.title);
+        body += `</li>`;
+      }
+      body += `</ul>`;
+    } else {
+      body += `<ul style="margin:2px 0 4px;padding-left:28px"><li style="color:#6b7280">—</li></ul>`;
+    }
+  }
+  body += `<p style="margin:14px 0">&nbsp;</p>`;
+
+  // ── § Veille Externe ──
+  body += `<p style="margin:0 0 8px"><strong>§&nbsp;&nbsp;🛸Veille Externe :</strong></p>`;
+
+  for (const domDef of MAIL_DOMAIN_ORDER) {
+    body += `<ul style="margin:0 0 4px;padding-left:20px;list-style:none">`;
+    body += `<li><strong>${domDef.emoji}&nbsp;${domDef.label}</strong></li>`;
+    body += `</ul>`;
+
+    for (const s of parsed) {
+      const domItems = s.items.filter(i => i.domain === domDef.key);
+      body += `<p style="margin:6px 0 2px;padding-left:20px"><strong>${escHtml(s.weekLabel)}</strong></p>`;
+      if (domItems.length > 0) {
+        body += `<ul style="margin:2px 0 10px;padding-left:44px">`;
+        for (const item of domItems) {
+          body += `<li style="margin-bottom:3px">`;
+          if (item.url) body += `<a href="${escHtml(item.url)}" style="color:#1155CC">${escHtml(item.title)}</a>`;
+          else body += escHtml(item.title);
+          body += `</li>`;
+        }
+        body += `</ul>`;
+      } else {
+        body += `<ul style="margin:2px 0 10px;padding-left:44px"><li style="color:#6b7280">—</li></ul>`;
+      }
+    }
+    body += `<p style="margin:10px 0">&nbsp;</p>`;
+  }
+
+  // ── Signature Task Force ──
+  body += `<p style="margin:20px 0 4px">&nbsp;</p>`;
+  body += `<p style="margin:0 0 4px"><a href="https://forge-confluence-production.ns-sid.intra/display/CIA/Task+Force+IA+groupe" style="color:#1155CC">Task Force IA : Task Force IA groupe - Communauté Intelligence Artificielle - Confluence (ns-sid.intra)</a></p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/3460" style="color:#1155CC">Cécile JOURDAS</a> : KNDS FR Robotics</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/383" style="color:#1155CC">Jean-Pierre BAUDU</a> : KNDS Optronics</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/532" style="color:#1155CC">Christophe BOULNOIS</a>, <a href="https://myintra.nexter/annuaire/user/9921" style="color:#1155CC">Pierre PIOVESAN</a> : Cellule IA KNDS Ammo FR</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/2958" style="color:#1155CC">Philippe MILLET</a>, <a href="https://myintra.nexter/annuaire/user/10876" style="color:#1155CC">Théo ZAPPELLINI</a> : D2I/ PVET</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/4670" style="color:#1155CC">Thomas WAGNER</a> <a href="https://myintra.app.internal/annuaire/user/2924" style="color:#1155CC">Pascal BARTHELON</a> : BSC – Cellule IA</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/4875" style="color:#1155CC">Eric STEFANUTTI</a>, <a href="https://myintra.app.internal/annuaire/user/2335" style="color:#1155CC">Stéphane SULINON</a> : DSI</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/1580" style="color:#1155CC">Bruno RICAUD</a>, <a href="https://myintra.nexter/annuaire/user/4656" style="color:#1155CC">Louis BONICEL</a>, <a href="https://myintra.app.internal/annuaire/user/12327" style="color:#1155CC">Florence LE CRAS</a>, <a href="https://myintra.app.internal/annuaire/user/12388" style="color:#1155CC">Capucine BERTRAND</a> : D2I/PINNO</p>`;
+
+  body += `</div>`;
+
+  // ── Générer le fichier .eml ──
+  const subject = `Veille IA — ${sorted.map(s => s.weekLabel).join(', ')}`;
+  const eml = buildEml(subject, body);
+  downloadEml(eml, `Veille_IA_${sorted[0].weekLabel.replace(/\s+/g, '_')}.eml`);
+
+  // ── Prévisualisation dans l'app ──
+  showExportPreviewHtml(body);
+  showToast('✅ Fichier .eml généré et téléchargé — ouvrez-le dans Outlook pour compléter le destinataire', 'success');
+}
+
+function buildEml(subject, htmlBody) {
+  const boundary = 'boundary_' + Math.random().toString(36).slice(2);
+  const date = new Date().toUTCString();
+  const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body>${htmlBody}</body></html>`;
+
+  // Texte brut minimal (fallback)
+  const plain = `Veille IA — Ouvrez ce mail en HTML pour voir le contenu complet.`;
+
+  return [
+    `MIME-Version: 1.0`,
+    `Date: ${date}`,
+    `Subject: =?UTF-8?B?${btoa(unescape(encodeURIComponent(subject)))}?=`,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/plain; charset=utf-8`,
+    `Content-Transfer-Encoding: quoted-printable`,
+    ``,
+    plain,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/html; charset=utf-8`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    // Base64 encode par chunks de 76 chars (RFC 2045)
+    btoa(unescape(encodeURIComponent(fullHtml))).replace(/(.{76})/g, '$1\r\n'),
+    ``,
+    `--${boundary}--`,
+  ].join('\r\n');
+}
+
+function downloadEml(content, filename) {
+  const blob = new Blob([content], { type: 'message/rfc822' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
 }
 
 function exportNewsletter() {

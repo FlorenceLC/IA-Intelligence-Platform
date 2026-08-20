@@ -446,8 +446,18 @@
           </div>
 
           <div class="form-group">
+            <label>URL de la page Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(lien cliquable dans le mail)</span></label>
+            <input type="text" id="mail-sommaire-url" class="input-field" placeholder="https://forge-confluence-production.ns-sid.intra/display/CIA/..." />
+          </div>
+
+          <div class="form-group">
+            <label>Titre de la page Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(optionnel)</span></label>
+            <input type="text" id="mail-sommaire-title" class="input-field" placeholder="Veille IA Août - Semaine 33 - Communauté Intelligence Artificielle – Confluence" />
+          </div>
+
+          <div class="form-group">
             <label>Sommaire Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(copiez-collez depuis Confluence)</span></label>
-            <textarea id="mail-sommaire-input" class="input-field" rows="6" placeholder="Collez ici le sommaire copié depuis votre page Confluence (avec les liens)...&#10;&#10;Exemple :&#10;- Titre de l'article https://lien.com&#10;- Autre article https://lien2.com" style="resize:vertical;font-size:13px"></textarea>
+            <textarea id="mail-sommaire-input" class="input-field" rows="7" placeholder="Collez ici le sommaire copié depuis votre page Confluence.&#10;&#10;Le parser reconnaît les sections :&#10;  🏆 À la une / Favoris&#10;  ⚔️ Défense | 👨‍🔬 Civil | 🏭 Entreprise&#10;  💻 Hardware | 📚 IA Techniques | 🤖 Robotique | ⚖️ Juridique&#10;&#10;Avec ou sans liens HTTP, chaque ligne = un article." style="resize:vertical;font-size:13px"></textarea>
           </div>
 
           <button class="btn-secondary full-width" onclick="addMailSommaire()" style="margin-bottom:12px">
@@ -467,8 +477,9 @@
           </div>
 
           <button class="btn-primary full-width" onclick="generateMailFromSommaires()">
-            📧 Générer le mail complet
+            📧 Générer le mail + télécharger .eml (Outlook)
           </button>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:center">Le fichier .eml s'ouvre directement dans Outlook. Il vous suffit d'ajouter le(s) destinataire(s) et d'envoyer.</p>
         </div>
       </div>
 
