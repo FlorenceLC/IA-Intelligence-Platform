@@ -14,7 +14,9 @@ let state = {
     duplicateThreshold: 82,
     sensitivity: 'normal',
     rssAutoFetch: true,
-    lastAutoFetch: null
+    lastAutoFetch: null,
+    rssMinYear: new Date().getFullYear(),
+    rssBannedWords: ['suicide', 'dénudé', 'pornographie', 'nude', 'gore']
   },
   currentDuplicateCheck: null,
   chatHistory: []
@@ -2004,18 +2006,50 @@ function copyExport() {
   const richHtml = preview.dataset.richHtml;
   const plain    = preview.dataset.raw || preview.innerText;
 
-  if (richHtml && navigator.clipboard && window.ClipboardItem) {
-    const blobHtml  = new Blob([richHtml], { type: 'text/html'  });
-    const blobPlain = new Blob([plain],    { type: 'text/plain' });
-    navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })])
-      .then(() => showToast('📋 Copié avec mise en forme — collez directement dans Confluence ou Gmail', 'success'))
-      .catch(() => {
-        navigator.clipboard.writeText(plain)
-          .then(() => showToast('📋 Copié (texte brut)', 'success'));
-      });
+  if (richHtml) {
+    // Méthode 1 : API Clipboard moderne avec text/html (fonctionne dans Chrome)
+    if (navigator.clipboard && window.ClipboardItem) {
+      // Gmail requiert que le HTML soit inline-styled — on l'enveloppe dans un doc complet
+      const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${richHtml}</body></html>`;
+      const blobHtml  = new Blob([fullHtml], { type: 'text/html'  });
+      const blobPlain = new Blob([plain || preview.innerText], { type: 'text/plain' });
+      navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })])
+        .then(() => showToast('📋 Copié avec mise en forme — collez dans Gmail (Ctrl+V) ou Confluence', 'success'))
+        .catch(() => _copyExportFallback(richHtml, plain));
+    } else {
+      _copyExportFallback(richHtml, plain);
+    }
   } else {
-    navigator.clipboard.writeText(plain)
+    navigator.clipboard.writeText(plain || preview.innerText)
       .then(() => showToast('📋 Copié', 'success'));
+  }
+}
+
+function _copyExportFallback(richHtml, plain) {
+  // Méthode 2 : execCommand (fallback, fonctionne sur Firefox/Safari pour le HTML)
+  try {
+    const el = document.createElement('div');
+    el.innerHTML = richHtml;
+    el.style.position = 'fixed';
+    el.style.opacity = '0';
+    el.style.pointerEvents = 'none';
+    document.body.appendChild(el);
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    const ok = document.execCommand('copy');
+    sel.removeAllRanges();
+    document.body.removeChild(el);
+    if (ok) {
+      showToast('📋 Copié avec mise en forme — collez dans Gmail ou Confluence', 'success');
+    } else {
+      throw new Error('execCommand failed');
+    }
+  } catch(e) {
+    navigator.clipboard.writeText(plain || '')
+      .then(() => showToast('📋 Copié (texte brut — votre navigateur ne supporte pas la copie HTML)', 'warning'));
   }
 }
 
@@ -2042,21 +2076,156 @@ function renderNewsletterWeekSelector() {
   `).join('');
 }
 
+// ============================================================
+// EXPORT MAIL — Système "Coller le sommaire Confluence"
+// ============================================================
+
+// Stockage des sommaires collés (par semaine label)
+let mailSommaires = []; // [{weekLabel, rawText, links:[{title, url}]}]
+
+function parseConfluenceSummary(text) {
+  // Extraire les liens : lignes avec pattern "- Titre (url)" ou "Titre : url" ou "Titre [url]"
+  const lines = text.split('\n').filter(l => l.trim());
+  const links = [];
+  const urlRegex = /https?:\/\/[^\s\)\]\}'"<>]+/g;
+  const allUrls = [...text.matchAll(urlRegex)].map(m => m[0]);
+
+  for (const line of lines) {
+    const urlMatch = line.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
+    const url = urlMatch ? urlMatch[0] : '';
+    // Nettoyer la ligne pour obtenir le titre
+    const title = line
+      .replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
+      .replace(/^[-•*\s]+/, '')
+      .replace(/[\[\]\(\)]/g, '')
+      .trim();
+    if (title.length > 3) links.push({ title, url });
+    else if (url) links.push({ title: url, url });
+  }
+  return links;
+}
+
+function addMailSommaire() {
+  const textarea = document.getElementById('mail-sommaire-input');
+  const weekInput = document.getElementById('mail-sommaire-week');
+  const rawText = textarea?.value?.trim();
+  const weekLabel = weekInput?.value?.trim();
+
+  if (!rawText) { showToast('⚠ Collez un sommaire Confluence', 'warning'); return; }
+  if (!weekLabel) { showToast('⚠ Indiquez le label de la semaine (ex: Semaine 33 — 2026)', 'warning'); return; }
+
+  // Éviter les doublons
+  const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabel);
+  const links = parseConfluenceSummary(rawText);
+  const entry = { weekLabel, rawText, links };
+
+  if (existing >= 0) {
+    mailSommaires[existing] = entry;
+    showToast(`🔄 Sommaire "${weekLabel}" mis à jour`, 'success');
+  } else {
+    mailSommaires.push(entry);
+    showToast(`✅ Sommaire "${weekLabel}" ajouté`, 'success');
+  }
+
+  if (textarea) textarea.value = '';
+  if (weekInput) weekInput.value = '';
+  renderMailSommairesList();
+}
+
+function removeMailSommaire(index) {
+  const removed = mailSommaires.splice(index, 1)[0];
+  renderMailSommairesList();
+  showToast(`🗑 Sommaire "${removed?.weekLabel}" supprimé`, 'warning');
+}
+
+function renderMailSommairesList() {
+  const container = document.getElementById('mail-sommaires-list');
+  if (!container) return;
+  if (mailSommaires.length === 0) {
+    container.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px 0">Aucun sommaire ajouté</div>`;
+    return;
+  }
+  container.innerHTML = mailSommaires.map((s, i) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:var(--navy);border-radius:6px;margin-bottom:6px;border:1px solid var(--navy-border)">
+      <div>
+        <strong style="font-size:13px;color:var(--beige)">${escHtml(s.weekLabel)}</strong>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${s.links.length} lien${s.links.length > 1 ? 's' : ''} détecté${s.links.length > 1 ? 's' : ''}</span>
+      </div>
+      <button class="action-btn" onclick="removeMailSommaire(${i})" style="color:var(--danger)" title="Supprimer">🗑</button>
+    </div>
+  `).join('');
+}
+
+function generateMailFromSommaires() {
+  if (mailSommaires.length === 0) {
+    showToast('⚠ Ajoutez au moins un sommaire Confluence', 'warning');
+    return;
+  }
+
+  const sortedSommaires = [...mailSommaires].sort((a, b) => a.weekLabel.localeCompare(b.weekLabel));
+  const titleVal = document.getElementById('mail-newsletter-title')?.value?.trim() || 'Veille Stratégique IA';
+
+  // ── Construire le HTML du mail riche ──
+  let html = `
+<div style="font-family:Arial,Helvetica,sans-serif;max-width:720px;color:#1a1a2e">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;border-radius:12px;overflow:hidden">
+    <tr>
+      <td style="padding:28px 32px 20px;background:linear-gradient(135deg,#1e293b,#0f172a);border-bottom:2px solid #334155">
+        <h1 style="margin:0;color:#e2d9c9;font-size:22px;font-weight:700;letter-spacing:-0.5px">${escHtml(titleVal)}</h1>
+        <p style="margin:8px 0 0;color:#94a3b8;font-size:13px">Généré le ${new Date().toLocaleDateString('fr-FR', { weekday:'long', day:'2-digit', month:'long', year:'numeric' })}</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 32px">`;
+
+  for (const sommaire of sortedSommaires) {
+    html += `
+        <div style="margin-bottom:28px">
+          <h2 style="margin:0 0 12px;color:#4a9eff;font-size:15px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;border-bottom:1px solid #1e3a5f;padding-bottom:8px">
+            📅 ${escHtml(sommaire.weekLabel)}
+          </h2>`;
+
+    if (sommaire.links.length > 0) {
+      html += `<ul style="margin:0;padding:0 0 0 18px;list-style:disc">`;
+      for (const link of sommaire.links) {
+        if (link.url) {
+          html += `<li style="margin-bottom:6px;color:#c8bfad;font-size:14px;line-height:1.5"><a href="${escHtml(link.url)}" style="color:#4a9eff;text-decoration:none">${escHtml(link.title)}</a></li>`;
+        } else {
+          html += `<li style="margin-bottom:6px;color:#c8bfad;font-size:14px;line-height:1.5">${escHtml(link.title)}</li>`;
+        }
+      }
+      html += `</ul>`;
+    } else {
+      // Fallback : afficher le texte brut
+      html += `<pre style="white-space:pre-wrap;color:#c8bfad;font-size:13px;font-family:inherit;margin:0">${escHtml(sommaire.rawText)}</pre>`;
+    }
+
+    html += `</div>`;
+  }
+
+  html += `
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px;background:#0a1120;border-top:1px solid #1e293b;color:#4a5568;font-size:11px;text-align:center">
+        Veille Stratégique IA — IA Intelligence Platform
+      </td>
+    </tr>
+  </table>
+</div>`;
+
+  showExportPreviewHtml(html);
+}
+
 function exportNewsletter() {
+  // Fallback ancienne newsletter (kept for compatibility)
   const selectedKeys = [...document.querySelectorAll('.newsletter-week-cb:checked')].map(i => i.value);
   if (selectedKeys.length === 0) { showToast('⚠ Sélectionnez au moins une semaine', 'warning'); return; }
-
   const validated = state.articles.filter(a => a.status === 'VALIDATED' && selectedKeys.includes(weekKey(a)));
   if (validated.length === 0) { showToast('⚠ Aucun article validé pour les semaines sélectionnées', 'warning'); return; }
-
-  const titleVal = document.getElementById('newsletter-title').value.trim();
-  const title = titleVal || `Veille IA`;
-  let output = `${title}\n${'═'.repeat(Math.min(title.length, 60))}\n\n`;
-
-  // Sort selected keys chronologically (oldest first for display)
+  const titleVal = document.getElementById('newsletter-title')?.value?.trim() || 'Veille IA';
+  let output = `${titleVal}\n${'═'.repeat(Math.min(titleVal.length, 60))}\n\n`;
   const sortedKeys = [...selectedKeys].sort((a, b) => a.localeCompare(b));
-
-  // ── Articles à la une ──
   const featured = validated.filter(a => a.favorite);
   if (featured.length > 0) {
     output += `Articles à la une :\n`;
@@ -2068,17 +2237,11 @@ function exportNewsletter() {
     }
     output += '\n';
   }
-
-  // ── Veille extérieure par domaine ──
   output += `Veille extérieure :\n`;
-  const domains = Object.keys(DOMAIN_ICONS);
-
-  for (const domain of domains) {
+  for (const domain of Object.keys(DOMAIN_ICONS)) {
     const domainArts = validated.filter(a => a.domain === domain);
     if (domainArts.length === 0) continue;
-
     output += `    - ${DOMAIN_ICONS[domain]} ${domain} :\n`;
-
     for (const key of sortedKeys) {
       const arts = domainArts.filter(a => weekKey(a) === key);
       if (arts.length === 0) continue;
@@ -2086,7 +2249,6 @@ function exportNewsletter() {
       arts.forEach(a => { output += `            - ${a.titleFr || a.title}\n`; });
     }
   }
-
   showExportPreview(output);
 }
 
@@ -2314,7 +2476,59 @@ function renderSettings() {
   const radio = document.querySelector(`input[name="sensitivity"][value="${state.settings.sensitivity}"]`);
   if (radio) radio.checked = true;
 
+  // RSS filters
+  const minYearEl = document.getElementById('rss-min-year');
+  if (minYearEl) minYearEl.value = state.settings.rssMinYear || new Date().getFullYear();
+  renderBannedWordsList();
+
   updateConnectionStatus();
+}
+
+function saveRssFilterSettings() {
+  const yearVal = parseInt(document.getElementById('rss-min-year')?.value || new Date().getFullYear());
+  state.settings.rssMinYear = isNaN(yearVal) ? new Date().getFullYear() : yearVal;
+  saveToStorage();
+  showToast('✅ Filtres RSS sauvegardés', 'success');
+}
+
+function renderBannedWordsList() {
+  const container = document.getElementById('banned-words-list');
+  if (!container) return;
+  const words = state.settings.rssBannedWords || [];
+  if (words.length === 0) {
+    container.innerHTML = `<span style="color:var(--text-muted);font-size:12px">Aucun mot interdit</span>`;
+    return;
+  }
+  container.innerHTML = words.map((w, i) => `
+    <span class="banned-word-tag">
+      ${escHtml(w)}
+      <button onclick="removeBannedWord(${i})" style="background:none;border:none;color:var(--danger);cursor:pointer;padding:0 0 0 4px;font-size:13px" title="Supprimer">×</button>
+    </span>
+  `).join('');
+}
+
+function addBannedWord() {
+  const input = document.getElementById('banned-word-input');
+  const word = (input?.value || '').trim().toLowerCase();
+  if (!word) return;
+  if (!state.settings.rssBannedWords) state.settings.rssBannedWords = [];
+  if (!state.settings.rssBannedWords.includes(word)) {
+    state.settings.rssBannedWords.push(word);
+    saveToStorage();
+    showToast(`🚫 "${word}" ajouté aux mots interdits`, 'success');
+  } else {
+    showToast('⚠ Ce mot est déjà dans la liste', 'warning');
+  }
+  if (input) input.value = '';
+  renderBannedWordsList();
+}
+
+function removeBannedWord(index) {
+  if (!state.settings.rssBannedWords) return;
+  const removed = state.settings.rssBannedWords.splice(index, 1)[0];
+  saveToStorage();
+  renderBannedWordsList();
+  showToast(`🗑 "${removed}" supprimé`, 'warning');
 }
 
 function exportData() {
@@ -2897,7 +3111,21 @@ async function fetchAllFeeds(showUI = true) {
     try {
       if (showUI) showLoading(`Lecture : ${feed.name}...`);
       const items = await fetchRssFeed(feed.url);
-      const aiItems = items.filter(item => isAiRelated(item.title + ' ' + item.description));
+      const minYear = state.settings.rssMinYear || new Date().getFullYear();
+      const bannedWords = (state.settings.rssBannedWords || []).map(w => w.toLowerCase());
+      const aiItems = items.filter(item => {
+        const text = (item.title + ' ' + item.description).toLowerCase();
+        // Filtre mots interdits
+        if (bannedWords.some(w => w && text.includes(w))) return false;
+        // Filtre année minimale
+        if (item.pubDate) {
+          try {
+            const d = new Date(item.pubDate);
+            if (!isNaN(d.getTime()) && d.getFullYear() < minYear) return false;
+          } catch(e) {}
+        }
+        return isAiRelated(text);
+      });
 
       // Filter already imported URLs — inclure TOUS les articles même capitalisés/rejetés
       // pour éviter de réimporter des articles déjà traités

@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>IA Intelligence Platform</title>
   <link rel="stylesheet" href="style.css" />
+  <style>
+    .banned-word-tag {
+      display:inline-flex;align-items:center;gap:2px;
+      background:rgba(248,113,113,0.12);border:1px solid rgba(248,113,113,0.3);
+      color:#f87171;border-radius:4px;padding:2px 8px;font-size:12px;
+    }
+  </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 </head>
@@ -427,29 +434,40 @@
 
       <div class="card">
         <div class="card-header">
-          <h2>📰 Export Newsletter</h2>
-          <span class="card-tag">Email</span>
+          <h2>📧 Export Mail — Sommaires Confluence</h2>
+          <span class="card-tag">Gmail</span>
         </div>
         <div class="export-options">
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 14px">Collez le sommaire d'une page Confluence semaine par semaine. Le mail sera généré en conservant tous les liens.</p>
+
           <div class="form-group">
-            <label>Semaines à inclure</label>
-            <div class="checkbox-group" id="newsletter-weeks-container">
-              <div style="color:var(--text-muted);font-size:12px">Chargement...</div>
+            <label>Label de la semaine <span style="color:var(--text-muted);font-weight:400;text-transform:none">(ex: Semaine 33 — 2026)</span></label>
+            <input type="text" id="mail-sommaire-week" class="input-field" placeholder="Semaine 33 — 2026" />
+          </div>
+
+          <div class="form-group">
+            <label>Sommaire Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(copiez-collez depuis Confluence)</span></label>
+            <textarea id="mail-sommaire-input" class="input-field" rows="6" placeholder="Collez ici le sommaire copié depuis votre page Confluence (avec les liens)...&#10;&#10;Exemple :&#10;- Titre de l'article https://lien.com&#10;- Autre article https://lien2.com" style="resize:vertical;font-size:13px"></textarea>
+          </div>
+
+          <button class="btn-secondary full-width" onclick="addMailSommaire()" style="margin-bottom:12px">
+            ➕ Ajouter ce sommaire
+          </button>
+
+          <div class="form-group">
+            <label>Sommaires ajoutés</label>
+            <div id="mail-sommaires-list" style="margin-top:6px">
+              <div style="color:var(--text-muted);font-size:12px;padding:8px 0">Aucun sommaire ajouté</div>
             </div>
           </div>
+
           <div class="form-group">
-            <label>Titre newsletter <span style="color:var(--text-muted);font-weight:400;text-transform:none">(optionnel)</span></label>
-            <input type="text" id="newsletter-title" class="input-field" placeholder="Veille IA — Semaine X" />
+            <label>Titre du mail <span style="color:var(--text-muted);font-weight:400;text-transform:none">(optionnel)</span></label>
+            <input type="text" id="mail-newsletter-title" class="input-field" placeholder="Veille Stratégique IA" />
           </div>
-          <div class="form-group">
-            <label>Fusion des articles similaires</label>
-            <label class="checkbox-item">
-              <input type="checkbox" id="newsletter-merge" checked>
-              Regrouper les articles traitant du même sujet
-            </label>
-          </div>
-          <button class="btn-primary full-width" onclick="exportNewsletter()">
-            📰 Générer la newsletter
+
+          <button class="btn-primary full-width" onclick="generateMailFromSommaires()">
+            📧 Générer le mail complet
           </button>
         </div>
       </div>
@@ -549,6 +567,35 @@
             </div>
           </div>
           <button class="btn-primary" onclick="saveDuplicateSettings()">Sauvegarder</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>📰 Filtres RSS</h2>
+          <span class="card-tag">Qualité</span>
+        </div>
+        <div class="settings-form">
+          <div class="form-group">
+            <label>Année minimale des articles</label>
+            <input type="number" id="rss-min-year" class="input-field" min="2020" max="2030" placeholder="2026" style="width:120px" />
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">Les articles publiés avant cette année seront ignorés lors du scan RSS.</p>
+          </div>
+
+          <div class="form-group">
+            <label>Mots interdits</label>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">Les articles contenant ces mots dans le titre ou la description seront automatiquement exclus.</p>
+            <div id="banned-words-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:28px">
+              <span style="color:var(--text-muted);font-size:12px">Chargement...</span>
+            </div>
+            <div style="display:flex;gap:8px">
+              <input type="text" id="banned-word-input" class="input-field" placeholder="Ajouter un mot interdit..." style="flex:1"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addBannedWord()}" />
+              <button class="btn-secondary" onclick="addBannedWord()">➕ Ajouter</button>
+            </div>
+          </div>
+
+          <button class="btn-primary" onclick="saveRssFilterSettings()">💾 Sauvegarder les filtres</button>
         </div>
       </div>
 
