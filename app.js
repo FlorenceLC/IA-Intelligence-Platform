@@ -305,7 +305,7 @@ async function generateSummaryWithMistral(article) {
       'Authorization': `Bearer ${state.settings.mistralKey}`
     },
     body: JSON.stringify({
-      model: 'mistral-large-latest',
+      model: 'mistral-small-latest',
       temperature: 0.3,
       messages: [
         {
@@ -384,7 +384,7 @@ async function extractDefenseTable(article) {
       'Authorization': `Bearer ${state.settings.mistralKey}`
     },
     body: JSON.stringify({
-      model: 'mistral-large-latest',
+      model: 'mistral-small-latest',
       temperature: 0.1,
       messages: [
         {
@@ -1166,10 +1166,54 @@ function renderVeille() {
   if (countEl) countEl.textContent = state.articles.filter(a => a.status === 'VALIDATED').length;
 }
 
+// ── Pré-prompt officiel de gestion des doublons (fourni par l'utilisateur) ──
+const DUPLICATE_SYSTEM_PROMPT = `Tu es un agent spécialisé dans la synthèse et la consolidation d'articles de veille sur l'intelligence artificielle.
+
+Ton objectif est d'identifier les articles qui traitent du même événement, de la même annonce, de la même technologie ou de la même actualité, même lorsque les articles sont rédigés différemment ou proviennent de sources différentes.
+
+1. Détection des doublons
+Lorsque plusieurs articles sont fournis, compare leur contenu factuel et leur sujet, et pas uniquement leurs mots ou leur formulation.
+Considère comme des doublons les articles qui :
+- reprennent exactement la même information ou le même contenu ;
+- traitent du même événement ou de la même annonce ;
+- présentent les mêmes faits principaux avec une formulation différente ;
+- apportent des informations complémentaires sur un même sujet.
+Ne considère pas comme doublons deux articles qui parlent simplement du même domaine ou de la même entreprise mais traitent de sujets, événements ou annonces différents.
+La similarité doit être évaluée principalement à partir du contenu des articles et des "Informations principales", et non à partir du titre seul.
+
+2. Fusion des articles similaires
+Lorsqu'un doublon est identifié, utilise comme base l'article déjà présent dans la veille et compare ses Informations principales avec celles du nouvel article.
+Cas 1 — Contenu identique : si les informations du nouvel article sont déjà entièrement présentes, ne crée pas de nouvel article, ne modifie pas les informations principales, conserve toutefois le lien du nouvel article.
+Cas 2 — Informations complémentaires : si le nouvel article contient des informations factuelles nouvelles, fusionne-les dans l'article existant, ajoute uniquement les nouveaux éléments factuels, ne répète jamais une information déjà présente, respecte la limite maximale de 7 bullet points.
+
+3. Gestion des bullet points
+Les "Informations principales" doivent contenir entre 3 et 7 bullet points maximum.
+Lors d'une fusion : ne conserve pas deux bullet points exprimant le même fait ; fusionne les informations similaires ; ajoute uniquement les informations réellement nouvelles ; ne crée jamais un 8e bullet point.
+
+4. Priorité des informations
+Conserve en priorité : les faits précis ; les chiffres ; les noms d'entreprises, personnes, modèles ou technologies ; les dates et échéances ; les informations techniques ; les informations permettant de comprendre les conséquences ou la portée de l'annonce.
+
+5. Règle fondamentale
+Le critère principal est la complémentarité de l'information, pas la différence de rédaction.
+Deux articles formulés très différemment mais rapportant les mêmes faits doivent être considérés comme des doublons.
+À l'inverse, deux articles utilisant des mots similaires mais rapportant des événements différents ne doivent pas être fusionnés.
+
+RÉPONDS UNIQUEMENT avec un objet JSON valide, sans markdown, sans backticks, sans texte avant ou après.
+Format de réponse :
+{
+  "isDuplicate": true | false,
+  "mergedKeyPoints": ["point 1", "point 2", ...],
+  "mergedSummary": "résumé consolidé en 1-2 phrases"
+}
+Si isDuplicate est false, mergedKeyPoints et mergedSummary peuvent être null.`;
+
 // Détecte et fusionne automatiquement les doublons parmi les articles validés
-// - Fusionne les résumés et les points clés
-// - Consolide tous les liens sous forme "🔗 Lien 1, Lien 2, ..."
+// Utilise le pré-prompt IA officiel pour une détection sémantique précise
 async function detectAndMergeVeilleDuplicates(btnEl) {
+  if (!state.settings.mistralKey) {
+    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
+    return;
+  }
   const validated = state.articles.filter(a => a.status === 'VALIDATED');
   if (validated.length < 2) {
     showToast('ℹ Pas assez d\'articles pour détecter des doublons', 'info');
@@ -1177,12 +1221,16 @@ async function detectAndMergeVeilleDuplicates(btnEl) {
   }
 
   const original = btnEl ? btnEl.textContent : '';
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Analyse...'; }
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Analyse IA en cours...'; }
 
-  const threshold  = state.settings.duplicateThreshold / 100;
-  const toDelete   = new Set();
-  const toUpdate   = new Map(); // id → article fusionné
-  let mergeCount   = 0;
+  const toDelete = new Set();
+  const toUpdate = new Map();
+  let mergeCount = 0;
+  let pairsChecked = 0;
+  const totalPairs = (validated.length * (validated.length - 1)) / 2;
+
+  // Pré-filtrage rapide par jaccard pour limiter les appels IA aux paires plausibles
+  const PRE_FILTER_THRESHOLD = 0.08; // très bas pour ne rater aucun doublon
 
   for (let i = 0; i < validated.length; i++) {
     if (toDelete.has(validated[i].id)) continue;
@@ -1190,56 +1238,106 @@ async function detectAndMergeVeilleDuplicates(btnEl) {
     for (let j = i + 1; j < validated.length; j++) {
       if (toDelete.has(validated[j].id)) continue;
 
-      const score = computeSimilarity(validated[i], validated[j]);
-      if (score < threshold) continue;
+      // Pré-filtrage lexical rapide
+      const preScore = computeSimilarity(validated[i], validated[j]);
+      if (preScore < PRE_FILTER_THRESHOLD) continue;
 
-      // Doublon détecté → fusionner j dans i
+      pairsChecked++;
+      if (btnEl) btnEl.textContent = `⏳ ${mergeCount} fusionné(s) — paire ${pairsChecked}...`;
+
       const base  = toUpdate.get(validated[i].id) || { ...validated[i] };
       const other = validated[j];
 
-      // Consolider les URLs — format : liens séparés
-      const baseUrls  = base._allUrls  || (base.url  ? [base.url]  : []);
-      const otherUrls = other._allUrls || (other.url ? [other.url] : []);
-      const allUrls   = [...new Set([...baseUrls, ...otherUrls])].filter(Boolean);
-      base._allUrls   = allUrls;
-      base.url        = allUrls[0] || '';
+      // Construire le prompt de comparaison
+      const userMsg = `Article A (existant dans la veille) :
+Titre : ${base.titleFr || base.title}
+Résumé : ${base.summary || ''}
+Informations principales :
+${(base.keyPoints || []).map(p => `- ${p}`).join('\n')}
 
-      // Fusionner les points clés (dédupliqués, max 10)
-      const combined = [...(base.keyPoints || []), ...(other.keyPoints || [])];
-      base.keyPoints = [...new Map(combined.map(p => [p.replace(/^[^\w]+/, '').substring(0, 40), p])).values()].slice(0, 10);
+Article B (nouvel article à analyser) :
+Titre : ${other.titleFr || other.title}
+Résumé : ${other.summary || ''}
+Informations principales :
+${(other.keyPoints || []).map(p => `- ${p}`).join('\n')}
 
-      // Garder le meilleur résumé (le plus long)
-      if ((other.summary || '').length > (base.summary || '').length) {
-        base.summary = other.summary;
+Ces deux articles sont-ils des doublons ? Si oui, fournis les keyPoints et le résumé fusionnés.`;
+
+      try {
+        const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.settings.mistralKey}` },
+          body: JSON.stringify({
+            model: 'mistral-small-latest',
+            temperature: 0.1,
+            messages: [
+              { role: 'system', content: DUPLICATE_SYSTEM_PROMPT },
+              { role: 'user',   content: userMsg }
+            ]
+          })
+        });
+
+        if (!resp.ok) {
+          if (resp.status === 429) await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        const data = await resp.json();
+        const raw  = (data.choices?.[0]?.message?.content || '').replace(/```json|```/g, '').trim();
+        let result;
+        try { result = JSON.parse(raw); } catch(e) { continue; }
+
+        if (!result.isDuplicate) continue;
+
+        // ── Doublon confirmé par l'IA → fusionner ──
+
+        // Liens
+        const baseUrls  = base._allUrls  || (base.url  ? [base.url]  : []);
+        const otherUrls = other._allUrls || (other.url ? [other.url] : []);
+        const allUrls   = [...new Set([...baseUrls, ...otherUrls])].filter(Boolean);
+        base._allUrls   = allUrls;
+        base.url        = allUrls[0] || '';
+
+        // KeyPoints fusionnés par l'IA (max 7)
+        if (Array.isArray(result.mergedKeyPoints) && result.mergedKeyPoints.length > 0) {
+          base.keyPoints = result.mergedKeyPoints.slice(0, 7);
+        }
+
+        // Résumé fusionné
+        if (result.mergedSummary) base.summary = result.mergedSummary;
+
+        // Date la plus ancienne
+        if (other.publicationDate && (!base.publicationDate || other.publicationDate < base.publicationDate)) {
+          base.publicationDate = other.publicationDate;
+          base.week     = getWeekNumber(new Date(other.publicationDate));
+          base.weekYear = getWeekYear(new Date(other.publicationDate));
+          base.month    = new Date(other.publicationDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
+        }
+
+        base.updatedAt = new Date().toISOString();
+        toUpdate.set(base.id, base);
+        toDelete.add(other.id);
+        mergeCount++;
+
+      } catch(e) {
+        console.warn('Duplicate AI check error:', e.message);
       }
 
-      // Date de publication la plus ancienne
-      if (other.publicationDate && (!base.publicationDate || other.publicationDate < base.publicationDate)) {
-        base.publicationDate = other.publicationDate;
-        base.week     = getWeekNumber(new Date(other.publicationDate));
-        base.weekYear = getWeekYear(new Date(other.publicationDate));
-        base.month    = new Date(other.publicationDate).toLocaleString('fr-FR', { month: 'long', year: 'numeric' });
-      }
-
-      base.updatedAt = new Date().toISOString();
-      toUpdate.set(base.id, base);
-      toDelete.add(other.id);
-      mergeCount++;
+      // Pause entre appels pour respecter le rate limit
+      await new Promise(r => setTimeout(r, 600));
     }
   }
 
   if (mergeCount === 0) {
     if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
-    showToast('ℹ Aucun doublon détecté avec le seuil actuel', 'info');
+    showToast(`ℹ Aucun doublon détecté (${pairsChecked} paire${pairsChecked > 1 ? 's' : ''} analysée${pairsChecked > 1 ? 's' : ''} par l'IA)`, 'info');
     return;
   }
 
-  // Appliquer les fusions : mettre à jour les articles fusionnés
+  // Appliquer les fusions
   for (const [id, merged] of toUpdate) {
-    // Formater le champ URL final avec tous les liens
     if (merged._allUrls && merged._allUrls.length > 1) {
-      merged.url = merged._allUrls[0]; // URL principale = premier lien
-      // Stocker tous les liens pour l'affichage
+      merged.url      = merged._allUrls[0];
       merged.extraUrls = merged._allUrls.slice(1);
     }
     delete merged._allUrls;
@@ -1247,15 +1345,12 @@ async function detectAndMergeVeilleDuplicates(btnEl) {
     if (idx !== -1) state.articles[idx] = merged;
   }
 
-  // Supprimer les doublons absorbés
   state.articles = state.articles.filter(a => !toDelete.has(a.id));
 
-  // Push immédiat (suppression définitive)
   try { localStorage.setItem('ia_platform_data', JSON.stringify(state)); } catch(e) {}
   _pushToSupabase();
 
   if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
-
   renderVeille();
   renderSavedArticles();
   updateStats();
@@ -1279,9 +1374,10 @@ async function forceGenerateVeilleSummaries(btnEl) {
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = `⏳ 0 / ${missing.length}...`; }
 
   let done = 0;
+  let failed = 0;
   for (const article of missing) {
     try {
-      if (btnEl) btnEl.textContent = `⏳ ${done + 1} / ${missing.length}...`;
+      if (btnEl) btnEl.textContent = `⏳ ${done + failed + 1} / ${missing.length} — ${done} généré${done > 1 ? 's' : ''}...`;
       const result = await generateSummaryWithMistral(article);
       article.titleFr      = result.titleFr   || article.title;
       article.title        = article.titleFr;
@@ -1305,15 +1401,24 @@ async function forceGenerateVeilleSummaries(btnEl) {
       await new Promise(r => setTimeout(r, 1000));
     } catch(e) {
       console.warn('Veille summary error:', article.title, e.message);
+      // Afficher l'erreur dans l'UI sans bloquer le reste
+      if (e.message.includes('403')) {
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+        showToast(`❌ Erreur 403 Mistral : modèle non disponible sur votre abonnement. Vérifiez votre clé API dans Paramètres.`, 'error');
+        return;
+      }
       if (e.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
-      done++;
+      failed++;
     }
   }
 
   if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
   syncAfterChange();
   renderVeille();
-  showToast(`✅ ${done} résumé${done > 1 ? 's' : ''} généré${done > 1 ? 's' : ''}`, 'success');
+  const msg = failed > 0
+    ? `✅ ${done} résumé${done > 1 ? 's' : ''} généré${done > 1 ? 's' : ''} — ⚠ ${failed} échec${failed > 1 ? 's' : ''}`
+    : `✅ ${done} résumé${done > 1 ? 's' : ''} généré${done > 1 ? 's' : ''}`;
+  showToast(msg, done > 0 ? 'success' : 'warning');
 }
 
 function renderVeilleIfActive() {
@@ -1800,7 +1905,7 @@ async function callChatAPI(question, context) {
         'Authorization': `Bearer ${state.settings.mistralKey}`
       },
       body: JSON.stringify({
-        model: 'mistral-large-latest',
+        model: 'mistral-small-latest',
         temperature: 0.4,
         messages: [
           {
@@ -2572,7 +2677,7 @@ async function testMistralConnection() {
         'Authorization': `Bearer ${key}`
       },
       body: JSON.stringify({
-        model: 'mistral-large-latest',
+        model: 'mistral-small-latest',
         messages: [{ role: 'user', content: 'Réponds juste "OK"' }],
         max_tokens: 5
       })
@@ -2765,7 +2870,7 @@ async function analysepastedText() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.settings.mistralKey}` },
       body: JSON.stringify({
-        model: 'mistral-large-latest',
+        model: 'mistral-small-latest',
         temperature: 0.1,
         messages: [
           {
