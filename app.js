@@ -9,7 +9,8 @@ let state = {
   articles: [],
   rssFeeds: [],        // { id, url, name, lastFetch, enabled }
   settings: {
-    mistralKey: '',
+    geminiKey: '',
+    geminiModel: 'gemini-2.5-flash-lite-preview-06-17',
     inoreaderToken: '',
     duplicateThreshold: 82,
     sensitivity: 'normal',
@@ -143,8 +144,8 @@ async function importArticle() {
     return;
   }
 
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Configurez votre clé API Mistral dans Paramètres', 'warning');
+  if (!state.settings.geminiKey) {
+    showToast('⚠ Configurez votre clé API Google Gemini dans Paramètres', 'warning');
     switchTab('settings');
     return;
   }
@@ -237,8 +238,8 @@ async function importArticle() {
       keyPoints: []
     };
 
-    // Step 3: Mistral extracts everything
-    showLoading('Génération du résumé avec Mistral...');
+    // Step 3: Gemini extracts everything
+    showLoading('Génération du résumé avec Gemini...');
     const result = await generateSummaryWithMistral(articleData);
     articleData.titleFr   = result.titleFr   || pageTitle || 'Article sans titre';
     articleData.title     = articleData.titleFr;
@@ -287,30 +288,45 @@ async function importArticle() {
   } catch(err) {
     hideLoading();
     const msg = err.message || 'Erreur inconnue';
-    if (msg.includes('401')) showToast('❌ Clé API Mistral invalide ou expirée', 'error');
+    if (msg.includes('401') || msg.includes('403')) showToast('❌ Clé API Gemini invalide ou expirée', 'error');
     else if (msg.includes('429')) showToast('❌ Limite de taux API atteinte — réessayez dans un moment', 'error');
     else if (msg.includes('timeout') || msg.includes('abort')) showToast('⚠ Délai dépassé — l\'article a quand même été traité', 'warning');
     else showToast('❌ Erreur : ' + msg, 'error');
   }
 }
 
-// ============ MISTRAL API ============
+// ============ GEMINI API ============
+
+// Helper: call Gemini generateContent endpoint
+async function callGemini(systemPrompt, userPrompt, temperature = 0.3) {
+  const model = state.settings.geminiModel || 'gemini-2.5-flash-lite-preview-06-17';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.settings.geminiKey}`;
+
+  const body = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    generationConfig: { temperature }
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    throw new Error(`Gemini API ${response.status}: ${errBody.substring(0, 200)}`);
+  }
+
+  const data = await response.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
 async function generateSummaryWithMistral(article) {
   const prompt = buildSummaryPrompt(article);
 
-  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${state.settings.mistralKey}`
-    },
-    body: JSON.stringify({
-      model: 'mistral-small-latest',
-      temperature: 0.3,
-      messages: [
-        {
-          role: 'system',
-          content: `Tu es un expert en veille stratégique IA. Tu extrais et résumes des articles en français.
+  const systemPrompt = `Tu es un expert en veille stratégique IA. Tu extrais et résumes des articles en français.
 RÉPONDS UNIQUEMENT avec un objet JSON valide, sans markdown, sans backticks, sans texte avant ou après.
 Structure JSON obligatoire :
 {
@@ -321,20 +337,9 @@ Structure JSON obligatoire :
   "publicationDate": "date de publication au format YYYY-MM-DD UNIQUEMENT si elle est explicitement écrite dans le contenu fourni, sinon null"
 }
 Les keyPoints doivent contenir entre 3 et 10 éléments, chacun commençant par un emoji.
-RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme "12 janvier 2025"). Si aucune date explicite n'est trouvée dans le contenu fourni, tu DOIS répondre null — ne propose jamais la date du jour ni une date approximative basée sur le contexte.`
-        },
-        { role: 'user', content: prompt }
-      ]
-    })
-  });
+RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme "12 janvier 2025"). Si aucune date explicite n'est trouvée dans le contenu fourni, tu DOIS répondre null — ne propose jamais la date du jour ni une date approximative basée sur le contexte.`;
 
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`Mistral API ${response.status}: ${errBody.substring(0, 100)}`);
-  }
-
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content || '';
+  const text = await callGemini(systemPrompt, prompt, 0.3);
 
   let parsed;
   try {
@@ -369,7 +374,7 @@ RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inven
   return parsed;
 }
 
-// ── Appel Mistral dédié, focalisé uniquement sur l'extraction du tableau IA militaire ──
+// ── Appel Gemini dédié, focalisé uniquement sur l'extraction du tableau IA militaire ──
 async function extractDefenseTable(article) {
   const content = article.content
     ? article.content.substring(0, 4000)
@@ -377,19 +382,7 @@ async function extractDefenseTable(article) {
 
   const userPrompt = `Titre : ${article.title}\n\nContenu :\n${content}`;
 
-  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${state.settings.mistralKey}`
-    },
-    body: JSON.stringify({
-      model: 'mistral-small-latest',
-      temperature: 0.1,
-      messages: [
-        {
-          role: 'system',
-          content: `Tu es un assistant spécialisé en veille documentaire sur l'intelligence artificielle. Tu analyses des articles pour identifier s'ils parlent d'un produit, système ou technologie intégrant de l'IA.
+  const systemPrompt = `Tu es un assistant spécialisé en veille documentaire sur l'intelligence artificielle. Tu analyses des articles pour identifier s'ils parlent d'un produit, système ou technologie intégrant de l'IA.
 
 Tâche :
 À partir du texte fourni, tu dois :
@@ -414,17 +407,9 @@ Règles strictes :
 RÉPONDS UNIQUEMENT avec un JSON valide, sans markdown, sans backticks :
 {"hasAI": true, "items": [{"fabricant": "...", "produit": "...", "fonctionIA": "...", "anneeSortie": "...", "statut": "...", "categorie": "..."}]}
 ou
-{"hasAI": false, "items": []}`
-        },
-        { role: 'user', content: userPrompt }
-      ]
-    })
-  });
+{"hasAI": false, "items": []}`;
 
-  if (!response.ok) throw new Error(`Mistral API ${response.status}`);
-
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content || '';
+  const text = await callGemini(systemPrompt, userPrompt, 0.1);
   const clean = text.replace(/```json|```/g, '').trim();
   const result = JSON.parse(clean);
 
@@ -1139,7 +1124,7 @@ function clearArticleDate(id) {
 async function regenerateDefenseTable(id, btnEl) {
   const article = state.articles.find(a => a.id === id);
   if (!article) return;
-  if (!state.settings.mistralKey) { showToast('⚠ Clé API Mistral requise', 'warning'); return; }
+  if (!state.settings.geminiKey) { showToast('⚠ Clé API Gemini requise', 'warning'); return; }
 
   const originalText = btnEl ? btnEl.textContent : '';
   if (btnEl) { btnEl.textContent = '⏳ Extraction...'; btnEl.disabled = true; }
@@ -1210,8 +1195,8 @@ Si isDuplicate est false, mergedKeyPoints et mergedSummary peuvent être null.`;
 // Détecte et fusionne automatiquement les doublons parmi les articles validés
 // Utilise le pré-prompt IA officiel pour une détection sémantique précise
 async function detectAndMergeVeilleDuplicates(btnEl) {
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
+  if (!state.settings.geminiKey) {
+    showToast('⚠ Clé API Gemini requise dans Paramètres', 'warning');
     return;
   }
   const validated = state.articles.filter(a => a.status === 'VALIDATED');
@@ -1264,28 +1249,15 @@ ${(other.keyPoints || []).map(p => `- ${p}`).join('\n')}
 Ces deux articles sont-ils des doublons ? Si oui, fournis les keyPoints et le résumé fusionnés.`;
 
       try {
-        const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.settings.mistralKey}` },
-          body: JSON.stringify({
-            model: 'mistral-small-latest',
-            temperature: 0.1,
-            messages: [
-              { role: 'system', content: DUPLICATE_SYSTEM_PROMPT },
-              { role: 'user',   content: userMsg }
-            ]
-          })
-        });
-
-        if (!resp.ok) {
-          if (resp.status === 429) await new Promise(r => setTimeout(r, 5000));
+        let raw;
+        try {
+          raw = await callGemini(DUPLICATE_SYSTEM_PROMPT, userMsg, 0.1);
+        } catch(apiErr) {
+          if (apiErr.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
           continue;
         }
-
-        const data = await resp.json();
-        const raw  = (data.choices?.[0]?.message?.content || '').replace(/```json|```/g, '').trim();
         let result;
-        try { result = JSON.parse(raw); } catch(e) { continue; }
+        try { result = JSON.parse(raw.replace(/```json|```/g, '').trim()); } catch(e) { continue; }
 
         if (!result.isDuplicate) continue;
 
@@ -1357,8 +1329,8 @@ Ces deux articles sont-ils des doublons ? Si oui, fournis les keyPoints et le r�
   showToast(`🔁 ${mergeCount} doublon${mergeCount > 1 ? 's' : ''} fusionné${mergeCount > 1 ? 's' : ''} — ${toDelete.size} article${toDelete.size > 1 ? 's' : ''} supprimé${toDelete.size > 1 ? 's' : ''}`, 'success');
 }
 async function forceGenerateVeilleSummaries(btnEl) {
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
+  if (!state.settings.geminiKey) {
+    showToast('⚠ Clé API Gemini requise dans Paramètres', 'warning');
     return;
   }
   // Articles validés sans résumé
@@ -1404,7 +1376,7 @@ async function forceGenerateVeilleSummaries(btnEl) {
       // Afficher l'erreur dans l'UI sans bloquer le reste
       if (e.message.includes('403')) {
         if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
-        showToast(`❌ Erreur 403 Mistral : modèle non disponible sur votre abonnement. Vérifiez votre clé API dans Paramètres.`, 'error');
+        showToast(`❌ Erreur 403 Gemini : clé invalide ou modèle non disponible. Vérifiez votre clé API dans Paramètres.`, 'error');
         return;
       }
       if (e.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
@@ -1893,36 +1865,14 @@ function relevanceScore(query, article) {
 }
 
 async function callChatAPI(question, context) {
-  if (!state.settings.mistralKey) {
+  if (!state.settings.geminiKey) {
     return generateLocalRAGAnswer(question, context);
   }
 
   try {
-    const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.settings.mistralKey}`
-      },
-      body: JSON.stringify({
-        model: 'mistral-small-latest',
-        temperature: 0.4,
-        messages: [
-          {
-            role: 'system',
-            content: `Tu es un assistant expert en veille stratégique IA. Tu réponds en français, de façon concise et structurée, en te basant uniquement sur les articles fournis en contexte. Si la réponse n'est pas dans les articles, dis-le clairement. Utilise des listes à puces pour la clarté.`
-          },
-          {
-            role: 'user',
-            content: `Contexte :\n${context}\n\nQuestion : ${question}`
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) throw new Error('API ' + response.status);
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || 'Aucune réponse générée.';
+    const systemPrompt = `Tu es un assistant expert en veille stratégique IA. Tu réponds en français, de façon concise et structurée, en te basant uniquement sur les articles fournis en contexte. Si la réponse n'est pas dans les articles, dis-le clairement. Utilise des listes à puces pour la clarté.`;
+    const userPrompt = `Contexte :\n${context}\n\nQuestion : ${question}`;
+    return await callGemini(systemPrompt, userPrompt, 0.4);
   } catch(e) {
     return generateLocalRAGAnswer(question, context);
   }
@@ -2657,58 +2607,58 @@ function copyExport() {
 }
 
 // ============ SETTINGS ============
-function saveMistralSettings() {
-  state.settings.mistralKey = document.getElementById('mistral-key').value.trim();
+function saveGeminiSettings() {
+  state.settings.geminiKey   = document.getElementById('gemini-key').value.trim();
+  state.settings.geminiModel = document.getElementById('gemini-model').value;
   saveToStorage();
   updateConnectionStatus();
-  showToast('✅ Clé API Mistral sauvegardée', 'success');
+  showToast('✅ Clé API Gemini sauvegardée', 'success');
 }
 
+// Keep old name as alias so any leftover HTML onclick="saveMistralSettings()" still works
+function saveMistralSettings() { saveGeminiSettings(); }
+
 async function testMistralConnection() {
-  const key = document.getElementById('mistral-key').value.trim();
-  if (!key) { showToast('⚠ Entrez votre clé API Mistral', 'warning'); return; }
-  showLoading('Test de connexion Mistral...');
+  const key   = document.getElementById('gemini-key').value.trim();
+  const model = document.getElementById('gemini-model').value || 'gemini-2.5-flash-lite-preview-06-17';
+  if (!key) { showToast('⚠ Entrez votre clé API Gemini', 'warning'); return; }
+  showLoading('Test de connexion Gemini...');
   const statusEl = document.getElementById('mistral-status');
   try {
-    const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${key}`
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'mistral-small-latest',
-        messages: [{ role: 'user', content: 'Réponds juste "OK"' }],
-        max_tokens: 5
+        contents: [{ role: 'user', parts: [{ text: 'Réponds juste "OK"' }] }],
+        generationConfig: { maxOutputTokens: 5 }
       })
     });
     hideLoading();
     if (response.ok) {
-      statusEl.textContent = '✅ Connexion réussie — Mistral API opérationnelle';
-      statusEl.className = 'connection-status success';
+      if (statusEl) { statusEl.textContent = `✅ Connexion réussie — Gemini API opérationnelle (${model})`; statusEl.className = 'connection-status success'; }
       document.querySelector('.status-dot')?.classList.add('active');
-      document.querySelector('.sidebar-footer span').textContent = 'Mistral connecté';
+      const lbl = document.querySelector('.sidebar-footer span');
+      if (lbl) lbl.textContent = 'Gemini connecté';
     } else {
       const err = await response.json().catch(() => ({}));
-      statusEl.textContent = '❌ Erreur ' + response.status + ' — ' + (err.message || 'Clé invalide');
-      statusEl.className = 'connection-status error';
+      if (statusEl) { statusEl.textContent = '❌ Erreur ' + response.status + ' — ' + (err.error?.message || 'Clé invalide'); statusEl.className = 'connection-status error'; }
     }
   } catch(e) {
     hideLoading();
-    statusEl.textContent = '❌ Impossible de joindre api.mistral.ai';
-    statusEl.className = 'connection-status error';
+    if (statusEl) { statusEl.textContent = '❌ Impossible de joindre generativelanguage.googleapis.com'; statusEl.className = 'connection-status error'; }
   }
 }
 
 function updateConnectionStatus() {
   const dot = document.querySelector('.status-dot');
   const label = document.querySelector('.sidebar-footer span');
-  if (state.settings.mistralKey) {
+  if (state.settings.geminiKey) {
     dot?.classList.add('active');
-    if (label) label.textContent = 'Mistral connecté';
+    if (label) label.textContent = 'Gemini connecté';
   } else {
     dot?.classList.remove('active');
-    if (label) label.textContent = 'Mistral non configuré';
+    if (label) label.textContent = 'Gemini non configuré';
   }
 }
 
@@ -2741,8 +2691,10 @@ function renderSettings() {
   document.getElementById('settings-pending').textContent = pending;
 
   // Restore saved values
-  const keyEl = document.getElementById('mistral-key');
-  if (keyEl && state.settings.mistralKey) keyEl.value = state.settings.mistralKey;
+  const keyEl = document.getElementById('gemini-key');
+  if (keyEl && state.settings.geminiKey) keyEl.value = state.settings.geminiKey;
+  const modelEl = document.getElementById('gemini-model');
+  if (modelEl && state.settings.geminiModel) modelEl.value = state.settings.geminiModel;
 
   const threshEl = document.getElementById('duplicate-threshold');
   if (threshEl) {
@@ -2847,7 +2799,7 @@ function clearAllData() {
 async function analysepastedText() {
   const text = document.getElementById('paste-text-input').value.trim();
   if (!text) { showToast('⚠ Collez du texte avant d\'analyser', 'warning'); return; }
-  if (!state.settings.mistralKey) { showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning'); return; }
+  if (!state.settings.geminiKey) { showToast('⚠ Clé API Gemini requise dans Paramètres', 'warning'); return; }
 
   const resultEl = document.getElementById('paste-analysis-result');
   resultEl.style.display = 'none';
@@ -2863,33 +2815,19 @@ async function analysepastedText() {
 
   showLoading(`Analyse du texte — ${foundUrls.length} lien(s) détecté(s)...`);
 
-  // 2. Demander à Mistral quels liens sont liés à l'IA
+  // 2. Demander à Gemini quels liens sont liés à l'IA
   let aiUrls = [];
   try {
-    const filterResp = await fetch('https://api.mistral.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.settings.mistralKey}` },
-      body: JSON.stringify({
-        model: 'mistral-small-latest',
-        temperature: 0.1,
-        messages: [
-          {
-            role: 'system',
-            content: `Tu es un expert en veille IA. On te donne un texte avec des liens et descriptions.
+    const filterSys = `Tu es un expert en veille IA. On te donne un texte avec des liens et descriptions.
 Tu dois identifier uniquement les liens dont le sujet traite d'intelligence artificielle, machine learning, LLM, robotique, automatisation IA, ou technologies IA.
 RÉPONDS UNIQUEMENT avec un JSON valide : { "ai_urls": ["url1", "url2"] }
-Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
-          },
-          { role: 'user', content: `Texte à analyser :\n\n${text}\n\nLiens détectés :\n${foundUrls.join('\n')}` }
-        ]
-      })
-    });
-    const filterData = await filterResp.json();
-    const filterText = filterData.choices?.[0]?.message?.content || '';
+Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`;
+    const filterUser = `Texte à analyser :\n\n${text}\n\nLiens détectés :\n${foundUrls.join('\n')}`;
+    const filterText = await callGemini(filterSys, filterUser, 0.1);
     const parsed = JSON.parse(filterText.replace(/```json|```/g, '').trim());
     aiUrls = parsed.ai_urls || [];
   } catch(e) {
-    // Fallback : filtrer localement par mots-clés si Mistral échoue
+    // Fallback : filtrer localement par mots-clés si Gemini échoue
     aiUrls = foundUrls.filter(url => isAiRelated(url + ' ' + text));
   }
 
@@ -2973,7 +2911,7 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`
         fromPaste: true, updatedAt: now.toISOString()
       };
 
-      // Générer résumé Mistral
+      // Générer résumé Gemini
       const result = await generateSummaryWithMistral(articleData);
       articleData.titleFr   = result.titleFr   || pageTitle || url;
       articleData.title     = articleData.titleFr;
@@ -3375,8 +3313,8 @@ async function fetchAllFeeds(showUI = true) {
     if (showUI) showToast('⚠ Aucun flux RSS actif. Ajoutez des flux d\'abord.', 'warning');
     return;
   }
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Clé Mistral requise pour analyser les articles RSS', 'warning');
+  if (!state.settings.geminiKey) {
+    showToast('⚠ Clé Gemini requise pour analyser les articles RSS', 'warning');
     return;
   }
   if (showUI) showLoading('Scan des flux RSS en cours...');
@@ -3703,7 +3641,7 @@ async function generateRssSummaries(showProgress = false) {
       // Refresh UI progressively so user sees summaries appearing
       renderRssDetectedArticles();
       renderValidationQueue();
-      // Mistral rate-limit: 1 request/sec on free tier, 500ms margin
+      // Gemini rate-limit: small pause to avoid quota issues
       await new Promise(r => setTimeout(r, 1000));
     } catch(e) {
       errors++;
@@ -3728,8 +3666,8 @@ async function generateRssSummaries(showProgress = false) {
 
 // Bouton manuel "Forcer la génération"
 async function forceGenerateSummaries() {
-  if (!state.settings.mistralKey) {
-    showToast('⚠ Clé API Mistral requise dans Paramètres', 'warning');
+  if (!state.settings.geminiKey) {
+    showToast('⚠ Clé API Gemini requise dans Paramètres', 'warning');
     return;
   }
   await generateRssSummaries(true);
@@ -4041,8 +3979,11 @@ async function syncNow(silent = false) {
       if (Array.isArray(remote.rssFeeds) && remote.rssFeeds.length > 0) {
         state.rssFeeds = mergeFeeds(state.rssFeeds, remote.rssFeeds);
       }
-      if (!state.settings.mistralKey && remote.settings?.mistralKey) {
-        state.settings.mistralKey = remote.settings.mistralKey;
+      if (!state.settings.geminiKey && remote.settings?.geminiKey) {
+        state.settings.geminiKey = remote.settings.geminiKey;
+      }
+      if (!state.settings.geminiModel && remote.settings?.geminiModel) {
+        state.settings.geminiModel = remote.settings.geminiModel;
       }
     }
 
