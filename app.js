@@ -10,7 +10,7 @@ let state = {
   rssFeeds: [],        // { id, url, name, lastFetch, enabled }
   settings: {
     geminiKey: '',
-    geminiModel: 'gemini-2.5-flash-lite-preview-06-17',
+    geminiModel: 'gemini-2.5-flash-lite',
     inoreaderToken: '',
     duplicateThreshold: 82,
     sensitivity: 'normal',
@@ -299,7 +299,7 @@ async function importArticle() {
 
 // Helper: call Gemini generateContent endpoint
 async function callGemini(systemPrompt, userPrompt, temperature = 0.3) {
-  const model = state.settings.geminiModel || 'gemini-2.5-flash-lite-preview-06-17';
+  const model = state.settings.geminiModel || 'gemini-2.5-flash-lite';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.settings.geminiKey}`;
 
   const body = {
