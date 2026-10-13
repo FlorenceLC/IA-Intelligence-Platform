@@ -326,18 +326,33 @@ async function callGemini(systemPrompt, userPrompt, temperature = 0.3) {
 async function generateSummaryWithMistral(article) {
   const prompt = buildSummaryPrompt(article);
 
-  const systemPrompt = `Tu es un expert en veille stratégique IA. Tu extrais et résumes des articles en français.
+  const systemPrompt = `Tu es un spécialiste de la synthèse d'articles IA pour veille professionnelle. Ton public cible est composé de professionnels de l'IA, analystes et chercheurs en veille technologique.
+
+TON ET STYLE : professionnel, neutre, concis. Aucun jugement subjectif. Priorise les faits concrets : dates, chiffres, noms propres, organisations.
+
 RÉPONDS UNIQUEMENT avec un objet JSON valide, sans markdown, sans backticks, sans texte avant ou après.
 Structure JSON obligatoire :
 {
-  "titleFr": "titre de l'article traduit/reformulé en français",
-  "summary": "résumé en 1 à 2 phrases claires en français",
-  "keyPoints": ["👩🏻‍🚀 point 1", "🦠 point 2", "🪐 point 3"],
+  "titleFr": "titre traduit ou reformulé en français — clair et factuel",
+  "summary": "résumé factuel en 1 à 2 phrases maximum, en français",
+  "keyPoints": [
+    "🏛️ Emoji pertinent + libellé court + détail factuel (chiffre, nom, fait concret)",
+    "..."
+  ],
   "domain": "un seul parmi : Défense, Civil, Entreprise, Hardware, AI technologie, Robotique, Juridique",
-  "publicationDate": "date de publication au format YYYY-MM-DD UNIQUEMENT si elle est explicitement écrite dans le contenu fourni, sinon null"
+  "publicationDate": "date de publication au format YYYY-MM-DD si explicitement présente dans le contenu, sinon null"
 }
-Les keyPoints doivent contenir entre 3 et 10 éléments, chacun commençant par un emoji.
-RÈGLE STRICTE sur publicationDate : tu ne dois JAMAIS deviner, estimer ou inventer une date. Cherche UNIQUEMENT une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou une date écrite en clair comme "12 janvier 2025"). Si aucune date explicite n'est trouvée dans le contenu fourni, tu DOIS répondre null — ne propose jamais la date du jour ni une date approximative basée sur le contexte.`;
+
+RÈGLES STRICTES sur keyPoints :
+- Entre 5 et 10 bullet points, jamais moins de 5, jamais plus de 10
+- Chaque point commence par un emoji PERTINENT par rapport au contenu du point (pas toujours le même)
+- Chaque point = emoji + libellé court + détail factuel (un chiffre, un nom, une date, un fait vérifiable)
+- Le texte du point n'est PAS en gras
+- Pas de redite entre le résumé et les points clés : les points approfondissent
+
+RÈGLE STRICTE sur publicationDate : ne jamais deviner ni inventer une date. Cherche uniquement une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou date écrite en clair). Si absente : null.
+
+RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la liste. "AI technologie" est le domaine par défaut si aucun autre ne s'applique clairement.`;
 
   const text = await callGemini(systemPrompt, prompt, 0.3);
 
@@ -2138,34 +2153,58 @@ function renderNewsletterWeekSelector() {
 // Stockage des sommaires collés (par semaine label)
 let mailSommaires = []; // [{weekLabel, rawText, links:[{title, url}]}]
 
-function parseConfluenceSummary(text) {
-  // Extraire les liens : lignes avec pattern "- Titre (url)" ou "Titre : url" ou "Titre [url]"
-  const lines = text.split('\n').filter(l => l.trim());
-  const links = [];
-  const urlRegex = /https?:\/\/[^\s\)\]\}'"<>]+/g;
-  const allUrls = [...text.matchAll(urlRegex)].map(m => m[0]);
+// ── Parser HTML du sommaire Confluence collé dans le div contenteditable ──
+// Extrait les <a href> et la structure de sections pour alimenter le mail
+function parseConfluenceSummaryFromHtml(html, fallbackText) {
+  // Créer un DOM temporaire pour parser le HTML
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
 
-  for (const line of lines) {
-    const urlMatch = line.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
-    const url = urlMatch ? urlMatch[0] : '';
-    // Nettoyer la ligne pour obtenir le titre
-    const title = line
-      .replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
-      .replace(/^[-•*\s]+/, '')
-      .replace(/[\[\]\(\)]/g, '')
-      .trim();
-    if (title.length > 3) links.push({ title, url });
-    else if (url) links.push({ title: url, url });
+  // Construire une liste plate de { text, url } dans l'ordre du DOM
+  const links = [];
+  const walker = document.createTreeWalker(tmp, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A') {
+      const href = node.getAttribute('href') || '';
+      const text = node.innerText?.trim() || node.textContent?.trim() || '';
+      if (text.length > 2) {
+        // Filtrer les liens internes Confluence (ancres, navigation)
+        const isContentLink = href && !href.startsWith('#') && text.length > 4;
+        links.push({ title: text, url: isContentLink ? href : '' });
+      }
+    }
   }
+
+  // Si aucun lien trouvé dans le HTML (collage plain-text), fallback sur le texte brut
+  if (links.length === 0) {
+    const lines = fallbackText.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      const urlMatch = line.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
+      const url = urlMatch ? urlMatch[0] : '';
+      const title = line.replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
+        .replace(/^[-•*·§\s]+/, '').replace(/[\[\]\(\)]/g, '').trim();
+      if (title.length > 3) links.push({ title, url });
+    }
+  }
+
   return links;
 }
 
+// Garde l'ancienne fonction pour compatibilité
+function parseConfluenceSummary(text) {
+  return parseConfluenceSummaryFromHtml('', text);
+}
+
 function addMailSommaire() {
-  const textarea      = document.getElementById('mail-sommaire-input');
+  const pasteDiv      = document.getElementById('mail-sommaire-input');
   const weekInput     = document.getElementById('mail-sommaire-week');
   const urlInput      = document.getElementById('mail-sommaire-url');
   const titleInput    = document.getElementById('mail-sommaire-title');
-  const rawText       = textarea?.value?.trim();
+
+  // Récupérer le HTML collé (préserve les <a href>) ET le texte brut (fallback)
+  const rawHtml       = pasteDiv?.innerHTML?.trim() || '';
+  const rawText       = pasteDiv?.innerText?.trim() || '';
   const weekLabelVal  = weekInput?.value?.trim();
   const confluenceUrl = urlInput?.value?.trim() || '';
   const confluenceTitle = titleInput?.value?.trim() || '';
@@ -2173,19 +2212,20 @@ function addMailSommaire() {
   if (!rawText) { showToast('⚠ Collez un sommaire Confluence', 'warning'); return; }
   if (!weekLabelVal) { showToast('⚠ Indiquez le label de la semaine (ex: Semaine 33 — 2026)', 'warning'); return; }
 
-  const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabelVal);
-  const links = parseConfluenceSummary(rawText);
-  const entry = { weekLabel: weekLabelVal, rawText, links, confluenceUrl, confluenceTitle };
+  // Parser le HTML pour extraire les liens réels
+  const links = parseConfluenceSummaryFromHtml(rawHtml, rawText);
+  const entry = { weekLabel: weekLabelVal, rawHtml, rawText, links, confluenceUrl, confluenceTitle };
 
+  const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabelVal);
   if (existing >= 0) {
     mailSommaires[existing] = entry;
     showToast(`🔄 Sommaire "${weekLabelVal}" mis à jour`, 'success');
   } else {
     mailSommaires.push(entry);
-    showToast(`✅ Sommaire "${weekLabelVal}" ajouté`, 'success');
+    showToast(`✅ Sommaire "${weekLabelVal}" ajouté — ${links.length} lien(s) détecté(s)`, 'success');
   }
 
-  if (textarea)    textarea.value = '';
+  if (pasteDiv)   { pasteDiv.innerHTML = ''; }
   if (weekInput)   weekInput.value = '';
   if (urlInput)    urlInput.value = '';
   if (titleInput)  titleInput.value = '';
@@ -2227,53 +2267,116 @@ const MAIL_DOMAIN_ORDER = [
   { key: 'Juridique',     emoji: '⚖️',  label: 'Juridique' },
 ];
 
-// Parse le texte brut d'un sommaire Confluence en items avec liens
+// Parse le HTML stocké d'un sommaire Confluence en items structurés
 // Chaque item = { title, url, domain, isFavorite }
-function parseConfluenceSommaireStructured(text, weekLabel) {
+function parseConfluenceSommaireStructured(text, weekLabel, html) {
+  const domainPatterns = [
+    { pattern: /défense/i,                       key: 'Défense' },
+    { pattern: /civil/i,                          key: 'Civil' },
+    { pattern: /entreprise/i,                     key: 'Entreprise' },
+    { pattern: /hardware/i,                       key: 'Hardware' },
+    { pattern: /ia.*tech|technique|technologie/i, key: 'AI technologie' },
+    { pattern: /robotique/i,                      key: 'Robotique' },
+    { pattern: /juridique/i,                      key: 'Juridique' },
+  ];
+  const favoritePatterns = /une|favori|à la une|featured/i;
+
+  // ── Stratégie 1 : parser le HTML (div contenteditable) ──
+  // On parcourt les noeuds en suivant la structure liste/texte du DOM
+  if (html) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const items = [];
+    let currentDomain = null;
+    let isFavorite = false;
+
+    // Récupère le texte visible d'un nœud (sans ses enfants <a>)
+    function nodeText(el) {
+      return (el.innerText || el.textContent || '').trim();
+    }
+
+    // Parcourt récursivement les enfants pour trouver liens et en-têtes
+    function walk(el, depth) {
+      for (const child of el.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) continue;
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+
+        const tag = child.tagName?.toUpperCase();
+        const text = nodeText(child);
+
+        if (!text) { walk(child, depth + 1); continue; }
+
+        // Lien direct = article
+        if (tag === 'A') {
+          const href = child.getAttribute('href') || '';
+          const url = href.startsWith('#') ? '' : href;
+          if (text.length > 3) {
+            items.push({ title: text, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
+          }
+          continue;
+        }
+
+        // Élément de liste ou paragraphe : peut être un en-tête de section ou contenir un lien
+        const anchors = child.querySelectorAll('a');
+        if (anchors.length > 0) {
+          // Contient des liens → traiter chaque lien
+          for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            const url = href.startsWith('#') ? '' : href;
+            const aText = (a.innerText || a.textContent || '').trim();
+            if (aText.length > 3) {
+              items.push({ title: aText, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
+            }
+          }
+          continue;
+        }
+
+        // Pas de lien : c'est un en-tête de section ou un texte de navigation
+        // Tester si c'est un label de domaine ou de favoris
+        let foundDomain = null;
+        for (const { pattern, key } of domainPatterns) {
+          if (pattern.test(text)) { foundDomain = key; break; }
+        }
+        if (foundDomain) { currentDomain = foundDomain; isFavorite = false; continue; }
+        if (favoritePatterns.test(text)) { isFavorite = true; currentDomain = null; continue; }
+
+        // Sinon descendre
+        walk(child, depth + 1);
+      }
+    }
+
+    walk(tmp, 0);
+    if (items.length > 0) return items;
+  }
+
+  // ── Stratégie 2 : fallback texte brut (ancien comportement) ──
   const lines = text.split('\n');
   const items = [];
   let currentDomain = null;
   let isFavorite = false;
 
-  const domainPatterns = [
-    { pattern: /défense/i,       key: 'Défense' },
-    { pattern: /civil/i,         key: 'Civil' },
-    { pattern: /entreprise/i,    key: 'Entreprise' },
-    { pattern: /hardware/i,      key: 'Hardware' },
-    { pattern: /ia.*tech|technique|technologie/i, key: 'AI technologie' },
-    { pattern: /robotique/i,     key: 'Robotique' },
-    { pattern: /juridique/i,     key: 'Juridique' },
-  ];
-  const favoritePatterns = /une|favori|à la une|featured/i;
-
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-
-    // Détecter les en-têtes de section (ligne sans lien HTTP ni puce article)
     const hasUrl = /https?:\/\//.test(trimmed);
+
     if (!hasUrl) {
-      // Chercher si c'est un label de domaine
       let foundDomain = null;
       for (const { pattern, key } of domainPatterns) {
         if (pattern.test(trimmed)) { foundDomain = key; break; }
       }
-      if (foundDomain) { currentDomain = foundDomain; continue; }
+      if (foundDomain) { currentDomain = foundDomain; isFavorite = false; continue; }
       if (favoritePatterns.test(trimmed)) { isFavorite = true; currentDomain = null; continue; }
-      // Sinon ignorer (c'est probablement un en-tête générique)
+      const cleaned = trimmed.replace(/^[-•*·§✦▸▶➤➢»›\s]+/, '').replace(/[\[\]\(\)]/g, '').trim();
+      if (cleaned.length > 4 && (currentDomain !== null || isFavorite)) {
+        items.push({ title: cleaned, url: '', domain: currentDomain, isFavorite: isFavorite && !currentDomain });
+      }
       continue;
     }
-
-    // Extraire URL
     const urlMatch = trimmed.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
     const url = urlMatch ? urlMatch[0] : '';
-    // Titre = tout ce qui n'est pas l'URL ni les puces
-    const title = trimmed
-      .replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
-      .replace(/^[-•*·§\s]+/, '')
-      .replace(/[\[\]\(\)]/g, '')
-      .trim() || url;
-
+    const title = trimmed.replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
+      .replace(/^[-•*·§\s]+/, '').replace(/[\[\]\(\)]/g, '').trim() || url;
     if (title.length > 2 || url) {
       items.push({ title, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
     }
@@ -2292,7 +2395,7 @@ function generateMailFromSommaires() {
   // ── Parser tous les sommaires ──
   const parsed = sorted.map(s => ({
     weekLabel: s.weekLabel,
-    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel),
+    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel, s.rawHtml || ''),
     confluenceUrl: s.confluenceUrl || '',
     confluenceTitle: s.confluenceTitle || `Veille IA — ${s.weekLabel} - Communauté Intelligence Artificielle – Confluence`,
   }));
@@ -2381,14 +2484,12 @@ function generateMailFromSommaires() {
 
   // ── Signature Task Force ──
   body += `<p style="margin:20px 0 4px">&nbsp;</p>`;
-  body += `<p style="margin:0 0 4px"><a href="https://forge-confluence-production.ns-sid.intra/display/CIA/Task+Force+IA+groupe" style="color:#1155CC">Task Force IA : Task Force IA groupe - Communauté Intelligence Artificielle - Confluence (ns-sid.intra)</a></p>`;
-  body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/3460" style="color:#1155CC">Cécile JOURDAS</a> : KNDS FR Robotics</p>`;
+  body += `<p style="margin:0 0 4px">Task Force IA : <a href="https://forge-confluence-production.ns-sid.intra/display/CIA/Task+Force+IA+groupe" style="color:#1155CC">Task Force IA groupe - Communauté Intelligence Artificielle - Confluence (ns-sid.intra)</a></p>`;
   body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/383" style="color:#1155CC">Jean-Pierre BAUDU</a> : KNDS Optronics</p>`;
   body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/532" style="color:#1155CC">Christophe BOULNOIS</a>, <a href="https://myintra.nexter/annuaire/user/9921" style="color:#1155CC">Pierre PIOVESAN</a> : Cellule IA KNDS Ammo FR</p>`;
   body += `<p style="margin:2px 0"><a href="https://myintra.nexter/annuaire/user/2958" style="color:#1155CC">Philippe MILLET</a>, <a href="https://myintra.nexter/annuaire/user/10876" style="color:#1155CC">Théo ZAPPELLINI</a> : D2I/ PVET</p>`;
-  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/4670" style="color:#1155CC">Thomas WAGNER</a> <a href="https://myintra.app.internal/annuaire/user/2924" style="color:#1155CC">Pascal BARTHELON</a> : BSC – Cellule IA</p>`;
-  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/4875" style="color:#1155CC">Eric STEFANUTTI</a>, <a href="https://myintra.app.internal/annuaire/user/2335" style="color:#1155CC">Stéphane SULINON</a> : DSI</p>`;
-  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/1580" style="color:#1155CC">Bruno RICAUD</a>, <a href="https://myintra.nexter/annuaire/user/4656" style="color:#1155CC">Louis BONICEL</a>, <a href="https://myintra.app.internal/annuaire/user/12327" style="color:#1155CC">Florence LE CRAS</a>, <a href="https://myintra.app.internal/annuaire/user/12388" style="color:#1155CC">Capucine BERTRAND</a> : D2I/PINNO</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/12385" style="color:#1155CC">Olivier DJOMBY</a>, <a href="https://myintra.app.internal/annuaire/user/4875" style="color:#1155CC">Eric STEFANUTTI</a>, <a href="https://myintra.app.internal/annuaire/user/2335" style="color:#1155CC">Stéphane SULINON</a>, <a href="https://myintra.app.internal/annuaire/user/4670" style="color:#1155CC">Thomas WAGNER</a> : DSI</p>`;
+  body += `<p style="margin:2px 0"><a href="https://myintra.app.internal/annuaire/user/1580" style="color:#1155CC">Bruno RICAUD</a>, <a href="https://myintra.nexter/annuaire/user/3460" style="color:#1155CC">Cécile JOURDAS</a>, <a href="https://myintra.app.internal/annuaire/user/13334" style="color:#1155CC">Guilhem FRISCH</a>, <a href="https://myintra.app.internal/annuaire/user/12327" style="color:#1155CC">Florence LE CRAS</a>, <a href="https://myintra.app.internal/annuaire/user/12388" style="color:#1155CC">Capucine BERTRAND</a> : D2I/PINNO</p>`;
 
   body += `</div>`;
 
@@ -2399,7 +2500,7 @@ function generateMailFromSommaires() {
 
   // ── Prévisualisation dans l'app ──
   showExportPreviewHtml(body);
-  showToast('✅ Fichier .eml généré et téléchargé — ouvrez-le dans Outlook pour compléter le destinataire', 'success');
+  showToast('✅ Mail généré — Outlook devrait s\'ouvrir automatiquement. Si non, autorisez les popups pour ce site.', 'success');
 }
 
 function buildEml(subject, htmlBody) {
@@ -2434,14 +2535,28 @@ function buildEml(subject, htmlBody) {
 }
 
 function downloadEml(content, filename) {
+  // Tente d'ouvrir directement dans Outlook via window.open (type message/rfc822)
+  // Si le navigateur bloque, bascule sur le téléchargement classique
   const blob = new Blob([content], { type: 'message/rfc822' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  const url  = URL.createObjectURL(blob);
+
+  // window.open avec ce MIME type ouvre Outlook sur la plupart des configs Windows
+  const win = window.open(url, '_blank');
+
+  // Fallback : si le popup est bloqué ou si le navigateur ne gère pas ce MIME,
+  // on télécharge le fichier comme avant
+  if (!win || win.closed || typeof win.closed === 'undefined') {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 3000);
+  } else {
+    // L'onglet s'est ouvert → Outlook devrait le prendre en charge
+    // On révoque l'URL après un délai pour laisser le temps au handler de se déclencher
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
 }
 
 function exportNewsletter() {

@@ -456,8 +456,13 @@
           </div>
 
           <div class="form-group">
-            <label>Sommaire Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(copiez-collez depuis Confluence)</span></label>
-            <textarea id="mail-sommaire-input" class="input-field" rows="7" placeholder="Collez ici le sommaire copié depuis votre page Confluence.&#10;&#10;Le parser reconnaît les sections :&#10;  🏆 À la une / Favoris&#10;  ⚔️ Défense | 👨‍🔬 Civil | 🏭 Entreprise&#10;  💻 Hardware | 📚 IA Techniques | 🤖 Robotique | ⚖️ Juridique&#10;&#10;Avec ou sans liens HTTP, chaque ligne = un article." style="resize:vertical;font-size:13px"></textarea>
+            <label>Sommaire Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(copiez-collez depuis Confluence — les liens sont conservés)</span></label>
+            <div id="mail-sommaire-input"
+                 contenteditable="true"
+                 class="input-field sommaire-paste-zone"
+                 style="min-height:140px;max-height:320px;overflow-y:auto;resize:vertical;font-size:13px;line-height:1.6;white-space:pre-wrap;cursor:text"
+                 data-placeholder="Collez ici le sommaire copié depuis votre page Confluence. Les hyperliens seront automatiquement conservés.&#10;&#10;Le parser reconnaît les sections :&#10;  🏆 À la une / Favoris&#10;  ⚔️ Défense | 👨‍🔬 Civil | 🏭 Entreprise&#10;  💻 Hardware | 📚 IA Techniques | 🤖 Robotique | ⚖️ Juridique"
+            ></div>
           </div>
 
           <button class="btn-secondary full-width" onclick="addMailSommaire()" style="margin-bottom:12px">
