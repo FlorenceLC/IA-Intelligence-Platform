@@ -2264,7 +2264,15 @@ function addMailSommaire() {
     showToast(`🔄 Sommaire "${weekLabelVal}" mis à jour`, 'success');
   } else {
     mailSommaires.push(entry);
-    showToast(`✅ Sommaire "${weekLabelVal}" ajouté — ${links.length} lien(s) détecté(s)`, 'success');
+    const withLink = links.filter(l => l.url).length;
+    if (links.length === 0) {
+      showToast(`⚠ Sommaire "${weekLabelVal}" ajouté mais aucun article détecté — vérifiez le collage`, 'warning');
+    } else if (withLink < links.length) {
+      showToast(`⚠ ${links.length} article(s) détecté(s), seulement ${withLink} avec lien. Vérifiez que l'URL de la page Confluence est renseignée.`, 'warning');
+    } else {
+      showToast(`✅ Sommaire "${weekLabelVal}" ajouté — ${links.length} article(s), tous avec lien`, 'success');
+    }
+    console.info('[Sommaire]', weekLabelVal, links);
   }
 
   if (pasteDiv)   { pasteDiv.innerHTML = ''; }
@@ -2291,7 +2299,7 @@ function renderMailSommairesList() {
     <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:var(--navy);border-radius:6px;margin-bottom:6px;border:1px solid var(--navy-border)">
       <div>
         <strong style="font-size:13px;color:var(--beige)">${escHtml(s.weekLabel)}</strong>
-        <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${s.links.length} lien${s.links.length > 1 ? 's' : ''} détecté${s.links.length > 1 ? 's' : ''}</span>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${s.links.length} article${s.links.length > 1 ? 's' : ''} · ${s.links.filter(l => l.url).length} avec lien</span>
       </div>
       <button class="action-btn" onclick="removeMailSommaire(${i})" style="color:var(--danger)" title="Supprimer">🗑</button>
     </div>
@@ -2331,7 +2339,7 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
 
   // Met à jour la section courante si le texte est un en-tête. Retourne true si c'est le cas.
   function applyHeading(t) {
-    if (!t || t.length > 80) return false;
+    if (!t || t.length > 45) return false;
     if (/veille\s+interne/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = true; return true; }
     if (/veille\s+externe/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = false; return true; }
     if (favoritePattern.test(t))     { currentDomain = null; isFavorite = true;  skipSection = false; return true; }
@@ -2349,12 +2357,26 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
     items.push({ title, url: url || '', domain: isFavorite ? null : currentDomain, isFavorite });
   }
 
+  // Retourne une URL absolue exploitable, ou '' si impossible.
+  // - garde les ancres (#Titre) et chemins relatifs en les rattachant à l'URL de la page Confluence
+  // - corrige les liens que le navigateur a réécrits vers l'adresse de CETTE application au collage
   function resolveHref(href) {
     href = (href || '').trim();
-    if (!href || href.startsWith('#') || /^(javascript|mailto):/i.test(href)) return '';
-    if (/^https?:\/\//i.test(href)) return href;
+    if (!href || href === '#' || /^(javascript|mailto|tel):/i.test(href)) return '';
+    try {
+      const u = new URL(href);
+      const here = (typeof location !== 'undefined') ? location : null;
+      if (u.protocol === 'file:') {
+        href = u.hash;
+      } else if (here && here.origin && u.origin === here.origin) {
+        href = (u.pathname === here.pathname && u.search === (here.search || '')) ? u.hash : (u.pathname + u.search + u.hash);
+      } else if (/^https?:$/.test(u.protocol)) {
+        return href;
+      }
+    } catch (e) { /* href relatif : on continue */ }
+    if (!href || href === '#') return '';
     if (baseUrl) { try { return new URL(href, baseUrl).href; } catch (e) {} }
-    return href;
+    return '';
   }
 
   // ── Stratégie 1 : HTML collé (liens <a href> conservés) ──
@@ -2363,38 +2385,41 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
     tmp.innerHTML = html;
     const items = [];
 
-    // Texte + liens d'un bloc, SANS ses listes imbriquées
-    function ownParts(el) {
-      const anchors = [];
-      let txt = '';
+    // Segments (texte + liens) d'un bloc, SANS ses listes imbriquées, découpés aux <br>
+    function ownSegments(el) {
+      const segs = [{ txt: '', anchors: [] }];
+      const cur = () => segs[segs.length - 1];
       (function rec(n) {
         for (const c of n.childNodes) {
-          if (c.nodeType === 3) { txt += c.textContent; continue; }
+          if (c.nodeType === 3) { cur().txt += c.textContent; continue; }
           if (c.nodeType !== 1) continue;
           const t = c.tagName;
           if (t === 'UL' || t === 'OL') continue;
-          if (t === 'BR') { txt += ' '; continue; }
-          if (t === 'A') { anchors.push(c); txt += c.textContent; continue; }
+          if (t === 'BR') { segs.push({ txt: '', anchors: [] }); continue; }
+          if (t === 'A') { cur().anchors.push(c); cur().txt += c.textContent; continue; }
           rec(c);
         }
       })(el);
-      return { text: txt.replace(/\s+/g, ' ').trim(), anchors };
+      return segs
+        .map(sg => ({ text: sg.txt.replace(/\s+/g, ' ').trim(), anchors: sg.anchors }))
+        .filter(sg => sg.text);
     }
 
     function handleBlock(el) {
-      const { text: t, anchors } = ownParts(el);
-      if (!t) return;
-      const linkAnchor = anchors.find(a => resolveHref(a.getAttribute('href')) && a.textContent.trim().length > 2);
-      if (linkAnchor) {
-        const aText = linkAnchor.textContent.replace(/\s+/g, ' ').trim();
-        // Si le lien ne couvre qu'une partie du texte, on garde le texte complet de la ligne
-        const title = aText.length >= 8 || aText.length >= t.length * 0.6 ? aText : t;
-        addItem(items, title, resolveHref(linkAnchor.getAttribute('href')));
-        return;
+      const hasSub = !!el.querySelector('ul, ol');
+      for (const { text: t, anchors } of ownSegments(el)) {
+        const linkAnchor = anchors.find(a => resolveHref(a.getAttribute('href')));
+        if (linkAnchor) {
+          const aText = linkAnchor.textContent.replace(/\s+/g, ' ').trim();
+          // Si le lien ne couvre qu'une partie de la ligne, on garde la ligne entière comme titre
+          const title = (aText.length >= 8 || aText.length >= t.length * 0.6) ? aText : t;
+          addItem(items, title, resolveHref(linkAnchor.getAttribute('href')));
+          continue;
+        }
+        if (applyHeading(t)) continue;
+        // Ligne sans lien et sans sous-liste, dans une section → article sans lien
+        if (!hasSub) addItem(items, t, '');
       }
-      if (applyHeading(t)) return;
-      // Ligne feuille sans lien (pas de sous-liste) dans une section → article sans lien
-      if (!el.querySelector('ul, ol')) addItem(items, t, '');
     }
 
     const BLOCKS = /^(P|DIV|H[1-6]|SECTION|ARTICLE|TABLE|TBODY|TR|TD|BLOCKQUOTE)$/;
