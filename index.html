@@ -459,6 +459,7 @@
             <label>Sommaire Confluence <span style="color:var(--text-muted);font-weight:400;text-transform:none">(copiez-collez depuis Confluence — les liens sont conservés)</span></label>
             <div id="mail-sommaire-input"
                  contenteditable="true"
+                 onpaste="captureSommairePaste(event)"
                  class="input-field sommaire-paste-zone"
                  style="min-height:140px;max-height:320px;overflow-y:auto;resize:vertical;font-size:13px;line-height:1.6;white-space:pre-wrap;cursor:text"
                  data-placeholder="Collez ici le sommaire copié depuis votre page Confluence. Les hyperliens seront automatiquement conservés.&#10;&#10;Le parser reconnaît les sections :&#10;  🏆 À la une / Favoris&#10;  ⚔️ Défense | 👨‍🔬 Civil | 🏭 Entreprise&#10;  💻 Hardware | 📚 IA Techniques | 🤖 Robotique | ⚖️ Juridique"

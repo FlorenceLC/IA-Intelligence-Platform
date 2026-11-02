@@ -2242,6 +2242,7 @@ function addMailSommaire() {
 
   // Récupérer le HTML collé (préserve les <a href>) ET le texte brut (fallback)
   const rawHtml       = pasteDiv?.innerHTML?.trim() || '';
+  const rawClipHtml   = pasteDiv?.dataset?.clipHtml || '';
   const rawText       = pasteDiv?.innerText?.trim() || '';
   const weekLabelVal  = weekInput?.value?.trim();
   const confluenceUrl = urlInput?.value?.trim() || '';
@@ -2255,8 +2256,18 @@ function addMailSommaire() {
   }
 
   // Parser le HTML pour extraire les liens réels
-  const links = parseConfluenceSommaireStructured(rawText, weekLabelVal, rawHtml, confluenceUrl);
-  const entry = { weekLabel: weekLabelVal, rawHtml, rawText, links, confluenceUrl, confluenceTitle };
+  const links = parseConfluenceSommaireStructured(rawText, weekLabelVal, rawHtml, confluenceUrl, rawClipHtml);
+
+  // Diagnostic : que contient réellement le collage ?
+  const stDom  = collectAnchors([rawHtml], confluenceUrl);
+  const stClip = collectAnchors([rawClipHtml], confluenceUrl);
+  const st = stClip.filter(a => a.url).length > stDom.filter(a => a.url).length ? stClip : stDom;
+  const diag = {
+    anchors:  st.length,
+    withHref: st.filter(a => a.raw).length,
+    usable:   st.filter(a => a.url).length,
+  };
+  const entry = { weekLabel: weekLabelVal, rawHtml, rawClipHtml, rawText, links, confluenceUrl, confluenceTitle, diag };
 
   const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabelVal);
   if (existing >= 0) {
@@ -2268,14 +2279,19 @@ function addMailSommaire() {
     if (links.length === 0) {
       showToast(`⚠ Sommaire "${weekLabelVal}" ajouté mais aucun article détecté — vérifiez le collage`, 'warning');
     } else if (withLink < links.length) {
-      showToast(`⚠ ${links.length} article(s) détecté(s), seulement ${withLink} avec lien. Vérifiez que l'URL de la page Confluence est renseignée.`, 'warning');
+      let why;
+      if (diag.anchors === 0)            why = "le collage ne contient aucun lien (copiez depuis la page Confluence affichée, pas depuis l'éditeur)";
+      else if (diag.withHref === 0)      why = "les liens collés n'ont pas d'URL (liens sans href)";
+      else if (diag.usable < diag.withHref) why = "des liens sont relatifs : renseignez l'URL de la page Confluence";
+      else                                why = "certains titres n'ont pas de lien correspondant dans le collage";
+      showToast(`⚠ ${links.length} article(s), ${withLink} avec lien — ${why}.`, 'warning');
     } else {
       showToast(`✅ Sommaire "${weekLabelVal}" ajouté — ${links.length} article(s), tous avec lien`, 'success');
     }
     console.info('[Sommaire]', weekLabelVal, links);
   }
 
-  if (pasteDiv)   { pasteDiv.innerHTML = ''; }
+  if (pasteDiv)   { pasteDiv.innerHTML = ''; pasteDiv.dataset.clipHtml = ''; }
   if (weekInput)   weekInput.value = '';
   if (urlInput)    urlInput.value = '';
   if (titleInput)  titleInput.value = MAIL_DEFAULT_PAGE_TITLE;
@@ -2299,7 +2315,7 @@ function renderMailSommairesList() {
     <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:var(--navy);border-radius:6px;margin-bottom:6px;border:1px solid var(--navy-border)">
       <div>
         <strong style="font-size:13px;color:var(--beige)">${escHtml(s.weekLabel)}</strong>
-        <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${s.links.length} article${s.links.length > 1 ? 's' : ''} · ${s.links.filter(l => l.url).length} avec lien</span>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${s.links.length} article${s.links.length > 1 ? 's' : ''} · ${s.links.filter(l => l.url).length} avec lien${s.diag ? ` · ${s.diag.anchors} lien(s) dans le collage` : ''}</span>
       </div>
       <button class="action-btn" onclick="removeMailSommaire(${i})" style="color:var(--danger)" title="Supprimer">🗑</button>
     </div>
@@ -2317,19 +2333,76 @@ const MAIL_DOMAIN_ORDER = [
   { key: 'Juridique',     emoji: '⚖️',  label: 'Juridique' },
 ];
 
+// ── Helpers liens du sommaire ──
+function anchorRawHref(a) {
+  return (a.getAttribute('href') || a.getAttribute('data-href') || a.getAttribute('data-url') ||
+          a.getAttribute('data-link-href') || '').trim();
+}
+
+// Retourne une URL absolue exploitable, ou '' si impossible.
+// - garde les ancres (#Titre) et chemins relatifs en les rattachant à l'URL de la page Confluence
+// - corrige les liens que le navigateur a réécrits vers l'adresse de CETTE application au collage
+function resolveSommaireHref(href, baseUrl) {
+  href = (href || '').trim();
+  if (!href || href === '#' || /^(javascript|mailto|tel):/i.test(href)) return '';
+  try {
+    const u = new URL(href);
+    const here = (typeof location !== 'undefined') ? location : null;
+    if (u.protocol === 'file:') {
+      href = u.hash;
+    } else if (here && here.origin && u.origin === here.origin) {
+      href = (u.pathname === here.pathname && u.search === (here.search || '')) ? u.hash : (u.pathname + u.search + u.hash);
+    } else if (/^https?:$/.test(u.protocol)) {
+      return href;
+    }
+  } catch (e) { /* href relatif : on continue */ }
+  if (!href || href === '#') return '';
+  if (baseUrl) { try { return new URL(href, baseUrl).href; } catch (e) {} }
+  return '';
+}
+
+function normTitle(t) {
+  return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Liste tous les <a> d'un ou plusieurs fragments HTML : { norm, raw, url }
+function collectAnchors(htmlList, baseUrl) {
+  const out = [];
+  for (const html of htmlList) {
+    if (!html) continue;
+    const d = document.createElement('div');
+    d.innerHTML = html;
+    d.querySelectorAll('a').forEach(a => {
+      const raw = anchorRawHref(a);
+      out.push({ norm: normTitle(a.textContent), raw, url: resolveSommaireHref(raw, baseUrl) });
+    });
+  }
+  return out;
+}
+
+// Mémorise le HTML brut du presse-papiers (hrefs d'origine, avant toute transformation du navigateur)
+function captureSommairePaste(e) {
+  try {
+    const html = e.clipboardData?.getData('text/html') || '';
+    const el = document.getElementById('mail-sommaire-input');
+    if (el && html) el.dataset.clipHtml = (el.dataset.clipHtml || '') + html;
+  } catch (err) { /* ignore */ }
+}
+
 // Parse le sommaire Confluence collé en items structurés
 // Chaque item = { title, url, domain, isFavorite }
 // Le HTML est parcouru dans l'ordre du document : chaque <li>/<p> est soit un en-tête
 // (section "À la une", "Défense"…) soit un article (contient un lien <a href>).
-function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
+function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl, extraHtml) {
   const domainPatterns = [
-    { pattern: /d[ée]fense/i,                      key: 'Défense' },
-    { pattern: /civil/i,                            key: 'Civil' },
-    { pattern: /entreprise/i,                       key: 'Entreprise' },
-    { pattern: /hardware/i,                         key: 'Hardware' },
-    { pattern: /ia\s*:?\s*tech|techniques?|technologie/i, key: 'AI technologie' },
-    { pattern: /robotique/i,                        key: 'Robotique' },
-    { pattern: /juridique/i,                        key: 'Juridique' },
+    { pattern: /defense/,                          key: 'Défense' },
+    { pattern: /civil/,                            key: 'Civil' },
+    { pattern: /entreprise/,                       key: 'Entreprise' },
+    { pattern: /hardware/,                         key: 'Hardware' },
+    { pattern: /\btechniques?\b|\btechnologies?\b|^ia tech/, key: 'AI technologie' },
+    { pattern: /robotique/,                        key: 'Robotique' },
+    { pattern: /juridique/,                        key: 'Juridique' },
   ];
   const favoritePattern = /à la une|a la une|article\(s\) à la une|favori/i;
 
@@ -2338,13 +2411,18 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
   let skipSection = false; // true dans "Veille Interne" (déjà dans le template du mail)
 
   // Met à jour la section courante si le texte est un en-tête. Retourne true si c'est le cas.
+  // Un en-tête = (presque) uniquement le nom de la section, pas un titre d'article contenant un mot-clé.
   function applyHeading(t) {
-    if (!t || t.length > 45) return false;
-    if (/veille\s+interne/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = true; return true; }
-    if (/veille\s+externe/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = false; return true; }
-    if (favoritePattern.test(t))     { currentDomain = null; isFavorite = true;  skipSection = false; return true; }
-    for (const { pattern, key } of domainPatterns) {
-      if (pattern.test(t)) { currentDomain = key; isFavorite = false; skipSection = false; return true; }
+    const n = normTitle(t);               // sans emojis, accents ni ponctuation
+    if (!n) return false;
+    const words = n.split(' ').length;
+    if (/^veille interne$/.test(n)) { currentDomain = null; isFavorite = false; skipSection = true;  return true; }
+    if (/^veille externe$/.test(n)) { currentDomain = null; isFavorite = false; skipSection = false; return true; }
+    if (/^(les )?(articles? ?s? )?(a la une|favoris?)$/.test(n)) { currentDomain = null; isFavorite = true; skipSection = false; return true; }
+    if (words <= 3) {
+      for (const { pattern, key } of domainPatterns) {
+        if (pattern.test(n)) { currentDomain = key; isFavorite = false; skipSection = false; return true; }
+      }
     }
     return false;
   }
@@ -2357,26 +2435,21 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
     items.push({ title, url: url || '', domain: isFavorite ? null : currentDomain, isFavorite });
   }
 
-  // Retourne une URL absolue exploitable, ou '' si impossible.
-  // - garde les ancres (#Titre) et chemins relatifs en les rattachant à l'URL de la page Confluence
-  // - corrige les liens que le navigateur a réécrits vers l'adresse de CETTE application au collage
-  function resolveHref(href) {
-    href = (href || '').trim();
-    if (!href || href === '#' || /^(javascript|mailto|tel):/i.test(href)) return '';
-    try {
-      const u = new URL(href);
-      const here = (typeof location !== 'undefined') ? location : null;
-      if (u.protocol === 'file:') {
-        href = u.hash;
-      } else if (here && here.origin && u.origin === here.origin) {
-        href = (u.pathname === here.pathname && u.search === (here.search || '')) ? u.hash : (u.pathname + u.search + u.hash);
-      } else if (/^https?:$/.test(u.protocol)) {
-        return href;
-      }
-    } catch (e) { /* href relatif : on continue */ }
-    if (!href || href === '#') return '';
-    if (baseUrl) { try { return new URL(href, baseUrl).href; } catch (e) {} }
-    return '';
+  const resolveHref = h => resolveSommaireHref(h, baseUrl);
+
+  // Associe les liens manquants par correspondance de titre avec TOUS les <a> du collage,
+  // indépendamment de la structure (sections, listes…).
+  const anchorPool = collectAnchors([html, extraHtml], baseUrl);
+  function finish(items) {
+    for (const it of items) {
+      if (it.url) continue;
+      const n = normTitle(it.title);
+      if (!n) continue;
+      const m = anchorPool.find(x => x.url && x.norm === n)
+             || anchorPool.find(x => x.url && x.norm.length >= 8 && n.length >= 8 && (n.includes(x.norm) || x.norm.includes(n)));
+      if (m) it.url = m.url;
+    }
+    return items;
   }
 
   // ── Stratégie 1 : HTML collé (liens <a href> conservés) ──
@@ -2408,12 +2481,12 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
     function handleBlock(el) {
       const hasSub = !!el.querySelector('ul, ol');
       for (const { text: t, anchors } of ownSegments(el)) {
-        const linkAnchor = anchors.find(a => resolveHref(a.getAttribute('href')));
+        const linkAnchor = anchors.find(a => resolveHref(anchorRawHref(a)));
         if (linkAnchor) {
           const aText = linkAnchor.textContent.replace(/\s+/g, ' ').trim();
           // Si le lien ne couvre qu'une partie de la ligne, on garde la ligne entière comme titre
           const title = (aText.length >= 8 || aText.length >= t.length * 0.6) ? aText : t;
-          addItem(items, title, resolveHref(linkAnchor.getAttribute('href')));
+          addItem(items, title, resolveHref(anchorRawHref(linkAnchor)));
           continue;
         }
         if (applyHeading(t)) continue;
@@ -2449,7 +2522,7 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
 
     visit(tmp);
     // Texte directement posé à la racine (sans balise) : on le traite aussi
-    if (items.length > 0) return items;
+    if (items.length > 0) return finish(items);
 
     // Reset avant le fallback texte
     currentDomain = null; isFavorite = false; skipSection = false;
@@ -2469,7 +2542,7 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
     if (applyHeading(trimmed)) continue;
     addItem(items, trimmed, '');
   }
-  return items;
+  return finish(items);
 }
 
 function generateMailFromSommaires() {
@@ -2483,7 +2556,7 @@ function generateMailFromSommaires() {
   // ── Parser tous les sommaires ──
   const parsed = sorted.map(s => ({
     weekLabel: s.weekLabel,
-    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel, s.rawHtml || '', s.confluenceUrl || ''),
+    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel, s.rawHtml || '', s.confluenceUrl || '', s.rawClipHtml || ''),
     confluenceUrl: s.confluenceUrl || '',
     confluenceTitle: s.confluenceTitle || `Veille IA — ${s.weekLabel} - Communauté Intelligence Artificielle – Confluence`,
   }));
