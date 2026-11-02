@@ -9,7 +9,8 @@ let state = {
   articles: [],
   rssFeeds: [],        // { id, url, name, lastFetch, enabled }
   settings: {
-    geminiKey: '',
+    geminiKey: '',      // clé "manuel" : imports, résumés manquants, doublons, chat
+    geminiKeyRss: '',   // clé "RSS" : résumés des flux RSS (retombe sur geminiKey si vide)
     geminiModel: 'gemini-3.5-flash-lite',
     inoreaderToken: '',
     duplicateThreshold: 82,
@@ -298,9 +299,16 @@ async function importArticle() {
 // ============ GEMINI API ============
 
 // Helper: call Gemini generateContent endpoint
-async function callGemini(systemPrompt, userPrompt, temperature = 0.3) {
-  const model = state.settings.geminiModel || 'gemini-3.5-flash-lite';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.settings.geminiKey}`;
+// Retourne la clé selon l'usage : 'rss' (flux RSS) ou 'manual' (tout le reste)
+// Si la clé RSS n'est pas renseignée, on utilise la clé principale.
+function getGeminiKey(purpose = 'manual') {
+  if (purpose === 'rss') return state.settings.geminiKeyRss || state.settings.geminiKey || '';
+  return state.settings.geminiKey || '';
+}
+
+async function callGemini(systemPrompt, userPrompt, temperature = 0.3, purpose = 'manual') {
+  const model = state.settings.geminiModel || 'gemini-3.6-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${getGeminiKey(purpose)}`;
 
   const body = {
     system_instruction: { parts: [{ text: systemPrompt }] },
@@ -308,22 +316,40 @@ async function callGemini(systemPrompt, userPrompt, temperature = 0.3) {
     generationConfig: { temperature }
   };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  // Retry automatique sur 429 (rate limit) et 503 (surcharge temporaire)
+  // Backoff exponentiel : 5s → 15s → 30s
+  const RETRYABLE = [429, 503];
+  const DELAYS    = [5000, 15000, 30000];
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    }
+
     const errBody = await response.text();
-    throw new Error(`Gemini API ${response.status}: ${errBody.substring(0, 200)}`);
-  }
+    const isRetryable = RETRYABLE.includes(response.status);
 
-  const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    // Dernier essai ou erreur non-retryable → on jette
+    if (!isRetryable || attempt === DELAYS.length) {
+      throw new Error(`Gemini API ${response.status}: ${errBody.substring(0, 200)}`);
+    }
+
+    // Attendre avant le prochain essai
+    const wait = DELAYS[attempt];
+    const label = response.status === 429 ? 'quota atteint' : 'surcharge serveur';
+    showToast(`⏳ Gemini ${label} — nouvel essai dans ${wait / 1000}s (${attempt + 1}/${DELAYS.length})`, 'warning');
+    await new Promise(r => setTimeout(r, wait));
+  }
 }
 
-async function generateSummaryWithMistral(article) {
+async function generateSummaryWithMistral(article, purpose = 'manual') {
   const prompt = buildSummaryPrompt(article);
 
   const systemPrompt = `Tu es un spécialiste de la synthèse d'articles IA pour veille professionnelle. Ton public cible est composé de professionnels de l'IA, analystes et chercheurs en veille technologique.
@@ -354,7 +380,7 @@ RÈGLE STRICTE sur publicationDate : ne jamais deviner ni inventer une date. Che
 
 RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la liste. "AI technologie" est le domaine par défaut si aucun autre ne s'applique clairement.`;
 
-  const text = await callGemini(systemPrompt, prompt, 0.3);
+  const text = await callGemini(systemPrompt, prompt, 0.3, purpose);
 
   let parsed;
   try {
@@ -380,7 +406,7 @@ RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la
   const effectiveDomain = parsed.domain || article.domain;
   if (effectiveDomain === 'Défense') {
     try {
-      parsed.defenseTable = await extractDefenseTable(article);
+      parsed.defenseTable = await extractDefenseTable(article, purpose);
     } catch(e) {
       console.warn('Extraction tableau Défense échouée:', e.message);
     }
@@ -390,7 +416,7 @@ RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la
 }
 
 // ── Appel Gemini dédié, focalisé uniquement sur l'extraction du tableau IA militaire ──
-async function extractDefenseTable(article) {
+async function extractDefenseTable(article, purpose = 'manual') {
   const content = article.content
     ? article.content.substring(0, 4000)
     : `Titre : ${article.title}\nURL : ${article.url}`;
@@ -424,7 +450,7 @@ RÉPONDS UNIQUEMENT avec un JSON valide, sans markdown, sans backticks :
 ou
 {"hasAI": false, "items": []}`;
 
-  const text = await callGemini(systemPrompt, userPrompt, 0.1);
+  const text = await callGemini(systemPrompt, userPrompt, 0.1, purpose);
   const clean = text.replace(/```json|```/g, '').trim();
   const result = JSON.parse(clean);
 
@@ -1268,7 +1294,7 @@ Ces deux articles sont-ils des doublons ? Si oui, fournis les keyPoints et le r�
         try {
           raw = await callGemini(DUPLICATE_SYSTEM_PROMPT, userMsg, 0.1);
         } catch(apiErr) {
-          if (apiErr.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
+          // callGemini gère le retry 429/503 — si ça échoue encore, on passe
           continue;
         }
         let result;
@@ -2196,6 +2222,18 @@ function parseConfluenceSummary(text) {
   return parseConfluenceSummaryFromHtml('', text);
 }
 
+// Valeurs pré-remplies des champs titre (il ne reste que MOIS et XX à modifier)
+const MAIL_DEFAULT_PAGE_TITLE = 'Veille IA MOIS Semaine XX – Communauté Intelligence Artificielle - Confluence';
+const MAIL_DEFAULT_SUBJECT    = 'Communauté IA - Veille IA MOIS';
+
+function initMailTitleDefaults() {
+  const t = document.getElementById('mail-sommaire-title');
+  if (t && !t.value.trim()) t.value = MAIL_DEFAULT_PAGE_TITLE;
+  const m = document.getElementById('mail-newsletter-title');
+  if (m && !m.value.trim()) m.value = MAIL_DEFAULT_SUBJECT;
+}
+document.addEventListener('DOMContentLoaded', initMailTitleDefaults);
+
 function addMailSommaire() {
   const pasteDiv      = document.getElementById('mail-sommaire-input');
   const weekInput     = document.getElementById('mail-sommaire-week');
@@ -2211,9 +2249,13 @@ function addMailSommaire() {
 
   if (!rawText) { showToast('⚠ Collez un sommaire Confluence', 'warning'); return; }
   if (!weekLabelVal) { showToast('⚠ Indiquez le label de la semaine (ex: Semaine 33 — 2026)', 'warning'); return; }
+  if (/MOIS|\bXX\b/.test(confluenceTitle)) {
+    showToast('⚠ Remplacez MOIS et XX dans le titre de la page Confluence', 'warning');
+    return;
+  }
 
   // Parser le HTML pour extraire les liens réels
-  const links = parseConfluenceSummaryFromHtml(rawHtml, rawText);
+  const links = parseConfluenceSommaireStructured(rawText, weekLabelVal, rawHtml, confluenceUrl);
   const entry = { weekLabel: weekLabelVal, rawHtml, rawText, links, confluenceUrl, confluenceTitle };
 
   const existing = mailSommaires.findIndex(s => s.weekLabel === weekLabelVal);
@@ -2228,7 +2270,7 @@ function addMailSommaire() {
   if (pasteDiv)   { pasteDiv.innerHTML = ''; }
   if (weekInput)   weekInput.value = '';
   if (urlInput)    urlInput.value = '';
-  if (titleInput)  titleInput.value = '';
+  if (titleInput)  titleInput.value = MAIL_DEFAULT_PAGE_TITLE;
   renderMailSommairesList();
 }
 
@@ -2267,119 +2309,140 @@ const MAIL_DOMAIN_ORDER = [
   { key: 'Juridique',     emoji: '⚖️',  label: 'Juridique' },
 ];
 
-// Parse le HTML stocké d'un sommaire Confluence en items structurés
+// Parse le sommaire Confluence collé en items structurés
 // Chaque item = { title, url, domain, isFavorite }
-function parseConfluenceSommaireStructured(text, weekLabel, html) {
+// Le HTML est parcouru dans l'ordre du document : chaque <li>/<p> est soit un en-tête
+// (section "À la une", "Défense"…) soit un article (contient un lien <a href>).
+function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl) {
   const domainPatterns = [
-    { pattern: /défense/i,                       key: 'Défense' },
-    { pattern: /civil/i,                          key: 'Civil' },
-    { pattern: /entreprise/i,                     key: 'Entreprise' },
-    { pattern: /hardware/i,                       key: 'Hardware' },
-    { pattern: /ia.*tech|technique|technologie/i, key: 'AI technologie' },
-    { pattern: /robotique/i,                      key: 'Robotique' },
-    { pattern: /juridique/i,                      key: 'Juridique' },
+    { pattern: /d[ée]fense/i,                      key: 'Défense' },
+    { pattern: /civil/i,                            key: 'Civil' },
+    { pattern: /entreprise/i,                       key: 'Entreprise' },
+    { pattern: /hardware/i,                         key: 'Hardware' },
+    { pattern: /ia\s*:?\s*tech|techniques?|technologie/i, key: 'AI technologie' },
+    { pattern: /robotique/i,                        key: 'Robotique' },
+    { pattern: /juridique/i,                        key: 'Juridique' },
   ];
-  const favoritePatterns = /une|favori|à la une|featured/i;
+  const favoritePattern = /à la une|a la une|article\(s\) à la une|favori/i;
 
-  // ── Stratégie 1 : parser le HTML (div contenteditable) ──
-  // On parcourt les noeuds en suivant la structure liste/texte du DOM
+  let currentDomain = null;
+  let isFavorite = false;
+  let skipSection = false; // true dans "Veille Interne" (déjà dans le template du mail)
+
+  // Met à jour la section courante si le texte est un en-tête. Retourne true si c'est le cas.
+  function applyHeading(t) {
+    if (!t || t.length > 80) return false;
+    if (/veille\s+interne/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = true; return true; }
+    if (/veille\s+externe/i.test(t)) { currentDomain = null; isFavorite = false; skipSection = false; return true; }
+    if (favoritePattern.test(t))     { currentDomain = null; isFavorite = true;  skipSection = false; return true; }
+    for (const { pattern, key } of domainPatterns) {
+      if (pattern.test(t)) { currentDomain = key; isFavorite = false; skipSection = false; return true; }
+    }
+    return false;
+  }
+
+  function addItem(items, title, url) {
+    if (skipSection) return;
+    if (!currentDomain && !isFavorite) return;
+    title = (title || '').replace(/^[-•*·§✦▸▶➤➢»›\s]+/, '').replace(/\s+/g, ' ').trim();
+    if (title.length < 3) return;
+    items.push({ title, url: url || '', domain: isFavorite ? null : currentDomain, isFavorite });
+  }
+
+  function resolveHref(href) {
+    href = (href || '').trim();
+    if (!href || href.startsWith('#') || /^(javascript|mailto):/i.test(href)) return '';
+    if (/^https?:\/\//i.test(href)) return href;
+    if (baseUrl) { try { return new URL(href, baseUrl).href; } catch (e) {} }
+    return href;
+  }
+
+  // ── Stratégie 1 : HTML collé (liens <a href> conservés) ──
   if (html) {
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
     const items = [];
-    let currentDomain = null;
-    let isFavorite = false;
 
-    // Récupère le texte visible d'un nœud (sans ses enfants <a>)
-    function nodeText(el) {
-      return (el.innerText || el.textContent || '').trim();
+    // Texte + liens d'un bloc, SANS ses listes imbriquées
+    function ownParts(el) {
+      const anchors = [];
+      let txt = '';
+      (function rec(n) {
+        for (const c of n.childNodes) {
+          if (c.nodeType === 3) { txt += c.textContent; continue; }
+          if (c.nodeType !== 1) continue;
+          const t = c.tagName;
+          if (t === 'UL' || t === 'OL') continue;
+          if (t === 'BR') { txt += ' '; continue; }
+          if (t === 'A') { anchors.push(c); txt += c.textContent; continue; }
+          rec(c);
+        }
+      })(el);
+      return { text: txt.replace(/\s+/g, ' ').trim(), anchors };
     }
 
-    // Parcourt récursivement les enfants pour trouver liens et en-têtes
-    function walk(el, depth) {
-      for (const child of el.childNodes) {
-        if (child.nodeType === Node.TEXT_NODE) continue;
-        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    function handleBlock(el) {
+      const { text: t, anchors } = ownParts(el);
+      if (!t) return;
+      const linkAnchor = anchors.find(a => resolveHref(a.getAttribute('href')) && a.textContent.trim().length > 2);
+      if (linkAnchor) {
+        const aText = linkAnchor.textContent.replace(/\s+/g, ' ').trim();
+        // Si le lien ne couvre qu'une partie du texte, on garde le texte complet de la ligne
+        const title = aText.length >= 8 || aText.length >= t.length * 0.6 ? aText : t;
+        addItem(items, title, resolveHref(linkAnchor.getAttribute('href')));
+        return;
+      }
+      if (applyHeading(t)) return;
+      // Ligne feuille sans lien (pas de sous-liste) dans une section → article sans lien
+      if (!el.querySelector('ul, ol')) addItem(items, t, '');
+    }
 
-        const tag = child.tagName?.toUpperCase();
-        const text = nodeText(child);
+    const BLOCKS = /^(P|DIV|H[1-6]|SECTION|ARTICLE|TABLE|TBODY|TR|TD|BLOCKQUOTE)$/;
 
-        if (!text) { walk(child, depth + 1); continue; }
-
-        // Lien direct = article
-        if (tag === 'A') {
-          const href = child.getAttribute('href') || '';
-          const url = href.startsWith('#') ? '' : href;
-          if (text.length > 3) {
-            items.push({ title: text, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
-          }
-          continue;
-        }
-
-        // Élément de liste ou paragraphe : peut être un en-tête de section ou contenir un lien
-        const anchors = child.querySelectorAll('a');
-        if (anchors.length > 0) {
-          // Contient des liens → traiter chaque lien
-          for (const a of anchors) {
-            const href = a.getAttribute('href') || '';
-            const url = href.startsWith('#') ? '' : href;
-            const aText = (a.innerText || a.textContent || '').trim();
-            if (aText.length > 3) {
-              items.push({ title: aText, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
-            }
-          }
-          continue;
-        }
-
-        // Pas de lien : c'est un en-tête de section ou un texte de navigation
-        // Tester si c'est un label de domaine ou de favoris
-        let foundDomain = null;
-        for (const { pattern, key } of domainPatterns) {
-          if (pattern.test(text)) { foundDomain = key; break; }
-        }
-        if (foundDomain) { currentDomain = foundDomain; isFavorite = false; continue; }
-        if (favoritePatterns.test(text)) { isFavorite = true; currentDomain = null; continue; }
-
-        // Sinon descendre
-        walk(child, depth + 1);
+    // Descend uniquement dans les listes imbriquées d'un bloc déjà traité
+    function visitNested(el) {
+      for (const c of el.children) {
+        if (c.tagName === 'UL' || c.tagName === 'OL') visit(c);
+        else if (c.querySelector('ul, ol')) visitNested(c);
       }
     }
 
-    walk(tmp, 0);
+    function visit(container) {
+      for (const c of container.children) {
+        const t = c.tagName;
+        if (t === 'UL' || t === 'OL') { visit(c); continue; }
+        if (t === 'LI') { handleBlock(c); visitNested(c); continue; }
+        if (BLOCKS.test(t)) {
+          const hasBlockChild = c.querySelector('ul, ol, p, div, li, h1, h2, h3, h4, h5, h6');
+          if (hasBlockChild) visit(c);
+          else handleBlock(c);
+          continue;
+        }
+        visit(c);
+      }
+    }
+
+    visit(tmp);
+    // Texte directement posé à la racine (sans balise) : on le traite aussi
     if (items.length > 0) return items;
+
+    // Reset avant le fallback texte
+    currentDomain = null; isFavorite = false; skipSection = false;
   }
 
-  // ── Stratégie 2 : fallback texte brut (ancien comportement) ──
-  const lines = text.split('\n');
+  // ── Stratégie 2 : texte brut (collage sans HTML) ──
   const items = [];
-  let currentDomain = null;
-  let isFavorite = false;
-
-  for (const line of lines) {
+  for (const line of (text || '').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const hasUrl = /https?:\/\//.test(trimmed);
-
-    if (!hasUrl) {
-      let foundDomain = null;
-      for (const { pattern, key } of domainPatterns) {
-        if (pattern.test(trimmed)) { foundDomain = key; break; }
-      }
-      if (foundDomain) { currentDomain = foundDomain; isFavorite = false; continue; }
-      if (favoritePatterns.test(trimmed)) { isFavorite = true; currentDomain = null; continue; }
-      const cleaned = trimmed.replace(/^[-•*·§✦▸▶➤➢»›\s]+/, '').replace(/[\[\]\(\)]/g, '').trim();
-      if (cleaned.length > 4 && (currentDomain !== null || isFavorite)) {
-        items.push({ title: cleaned, url: '', domain: currentDomain, isFavorite: isFavorite && !currentDomain });
-      }
+    const urlMatch = trimmed.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
+    if (urlMatch) {
+      const title = trimmed.replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '').replace(/[\[\]\(\)]/g, '').trim() || urlMatch[0];
+      addItem(items, title, urlMatch[0]);
       continue;
     }
-    const urlMatch = trimmed.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
-    const url = urlMatch ? urlMatch[0] : '';
-    const title = trimmed.replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
-      .replace(/^[-•*·§\s]+/, '').replace(/[\[\]\(\)]/g, '').trim() || url;
-    if (title.length > 2 || url) {
-      items.push({ title, url, domain: currentDomain, isFavorite: isFavorite && !currentDomain });
-    }
+    if (applyHeading(trimmed)) continue;
+    addItem(items, trimmed, '');
   }
   return items;
 }
@@ -2395,7 +2458,7 @@ function generateMailFromSommaires() {
   // ── Parser tous les sommaires ──
   const parsed = sorted.map(s => ({
     weekLabel: s.weekLabel,
-    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel, s.rawHtml || ''),
+    items: parseConfluenceSommaireStructured(s.rawText, s.weekLabel, s.rawHtml || '', s.confluenceUrl || ''),
     confluenceUrl: s.confluenceUrl || '',
     confluenceTitle: s.confluenceTitle || `Veille IA — ${s.weekLabel} - Communauté Intelligence Artificielle – Confluence`,
   }));
@@ -2494,7 +2557,12 @@ function generateMailFromSommaires() {
   body += `</div>`;
 
   // ── Générer le fichier .eml ──
-  const subject = `Veille IA — ${sorted.map(s => s.weekLabel).join(', ')}`;
+  const customSubject = document.getElementById('mail-newsletter-title')?.value?.trim();
+  if (!customSubject || /\bMOIS\b/.test(customSubject)) {
+    showToast('⚠ Remplacez MOIS dans le titre du mail (ex : Communauté IA - Veille IA Octobre)', 'warning');
+    return;
+  }
+  const subject = customSubject;
   const eml = buildEml(subject, body);
   downloadEml(eml, `Veille_IA_${sorted[0].weekLabel.replace(/\s+/g, '_')}.eml`);
 
@@ -2723,52 +2791,73 @@ function copyExport() {
 
 // ============ SETTINGS ============
 function saveGeminiSettings() {
-  state.settings.geminiKey   = document.getElementById('gemini-key').value.trim();
+  state.settings.geminiKey    = document.getElementById('gemini-key').value.trim();
+  state.settings.geminiKeyRss = document.getElementById('gemini-key-rss').value.trim();
   state.settings.geminiModel = document.getElementById('gemini-model').value;
   saveToStorage();
   updateConnectionStatus();
-  showToast('✅ Clé API Gemini sauvegardée', 'success');
+  showToast('✅ Clés API Gemini sauvegardées', 'success');
 }
 
 // Keep old name as alias so any leftover HTML onclick="saveMistralSettings()" still works
 function saveMistralSettings() { saveGeminiSettings(); }
 
 async function testMistralConnection() {
-  const key   = document.getElementById('gemini-key').value.trim();
-  const model = document.getElementById('gemini-model').value || 'gemini-2.5-flash-lite-preview-06-17';
-  if (!key) { showToast('⚠ Entrez votre clé API Gemini', 'warning'); return; }
+  const keyManual = document.getElementById('gemini-key').value.trim();
+  const keyRss    = document.getElementById('gemini-key-rss').value.trim();
+  const model     = document.getElementById('gemini-model').value || 'gemini-3.6-flash';
+  if (!keyManual && !keyRss) { showToast('⚠ Entrez au moins une clé API Gemini', 'warning'); return; }
   showLoading('Test de connexion Gemini...');
   const statusEl = document.getElementById('mistral-status');
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: 'Réponds juste "OK"' }] }],
-        generationConfig: { maxOutputTokens: 5 }
-      })
-    });
-    hideLoading();
-    if (response.ok) {
-      if (statusEl) { statusEl.textContent = `✅ Connexion réussie — Gemini API opérationnelle (${model})`; statusEl.className = 'connection-status success'; }
-      document.querySelector('.status-dot')?.classList.add('active');
-      const lbl = document.querySelector('.sidebar-footer span');
-      if (lbl) lbl.textContent = 'Gemini connecté';
-    } else {
+
+  async function testKey(key) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: 'Réponds juste "OK"' }] }],
+          generationConfig: { maxOutputTokens: 5 }
+        })
+      });
+      if (response.ok) return { ok: true };
       const err = await response.json().catch(() => ({}));
-      if (statusEl) { statusEl.textContent = '❌ Erreur ' + response.status + ' — ' + (err.error?.message || 'Clé invalide'); statusEl.className = 'connection-status error'; }
+      return { ok: false, msg: `Erreur ${response.status} — ${err.error?.message || 'Clé invalide'}` };
+    } catch(e) {
+      return { ok: false, msg: 'Impossible de joindre generativelanguage.googleapis.com' };
     }
-  } catch(e) {
-    hideLoading();
-    if (statusEl) { statusEl.textContent = '❌ Impossible de joindre generativelanguage.googleapis.com'; statusEl.className = 'connection-status error'; }
+  }
+
+  const lines = [];
+  let allOk = true;
+  if (keyManual) {
+    const r = await testKey(keyManual);
+    lines.push(r.ok ? '✅ Clé principale (manuel) : OK' : '❌ Clé principale (manuel) : ' + r.msg);
+    if (!r.ok) allOk = false;
+  }
+  if (keyRss) {
+    const r = await testKey(keyRss);
+    lines.push(r.ok ? '✅ Clé RSS : OK' : '❌ Clé RSS : ' + r.msg);
+    if (!r.ok) allOk = false;
+  }
+  hideLoading();
+
+  if (statusEl) {
+    statusEl.innerHTML = lines.join('<br>') + `<br><span style="opacity:.7">Modèle : ${model}</span>`;
+    statusEl.className = 'connection-status ' + (allOk ? 'success' : 'error');
+  }
+  if (allOk) {
+    document.querySelector('.status-dot')?.classList.add('active');
+    const lbl = document.querySelector('.sidebar-footer span');
+    if (lbl) lbl.textContent = 'Gemini connecté';
   }
 }
 
 function updateConnectionStatus() {
   const dot = document.querySelector('.status-dot');
   const label = document.querySelector('.sidebar-footer span');
-  if (state.settings.geminiKey) {
+  if (state.settings.geminiKey || state.settings.geminiKeyRss) {
     dot?.classList.add('active');
     if (label) label.textContent = 'Gemini connecté';
   } else {
@@ -2808,6 +2897,8 @@ function renderSettings() {
   // Restore saved values
   const keyEl = document.getElementById('gemini-key');
   if (keyEl && state.settings.geminiKey) keyEl.value = state.settings.geminiKey;
+  const keyRssEl = document.getElementById('gemini-key-rss');
+  if (keyRssEl && state.settings.geminiKeyRss) keyRssEl.value = state.settings.geminiKeyRss;
   const modelEl = document.getElementById('gemini-model');
   if (modelEl && state.settings.geminiModel) modelEl.value = state.settings.geminiModel;
 
@@ -3428,8 +3519,8 @@ async function fetchAllFeeds(showUI = true) {
     if (showUI) showToast('⚠ Aucun flux RSS actif. Ajoutez des flux d\'abord.', 'warning');
     return;
   }
-  if (!state.settings.geminiKey) {
-    showToast('⚠ Clé Gemini requise pour analyser les articles RSS', 'warning');
+  if (!getGeminiKey('rss')) {
+    showToast('⚠ Clé Gemini (RSS) requise pour analyser les articles RSS', 'warning');
     return;
   }
   if (showUI) showLoading('Scan des flux RSS en cours...');
@@ -3733,7 +3824,7 @@ async function generateRssSummaries(showProgress = false) {
   for (const article of pending) {
     try {
       if (showProgress) showLoading(`Génération des résumés : ${done} / ${total}...`);
-      const result = await generateSummaryWithMistral(article);
+      const result = await generateSummaryWithMistral(article, 'rss');
       article.titleFr      = result.titleFr   || article.title;
       article.title        = article.titleFr;
       article.summary      = result.summary   || '';
@@ -3756,14 +3847,13 @@ async function generateRssSummaries(showProgress = false) {
       // Refresh UI progressively so user sees summaries appearing
       renderRssDetectedArticles();
       renderValidationQueue();
-      // Gemini rate-limit: small pause to avoid quota issues
-      await new Promise(r => setTimeout(r, 1000));
+      // Gemini free tier : max 15 req/min → 1 req toutes les 4s minimum
+      await new Promise(r => setTimeout(r, 4000));
     } catch(e) {
       errors++;
       console.warn('RSS summary error:', article.title, e.message);
-      // On rate limit (429) wait longer before retrying next
-      if (e.message.includes('429')) await new Promise(r => setTimeout(r, 5000));
-      else await new Promise(r => setTimeout(r, 800));
+      // callGemini gère déjà le retry — pause courte avant l'article suivant
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
@@ -3781,8 +3871,8 @@ async function generateRssSummaries(showProgress = false) {
 
 // Bouton manuel "Forcer la génération"
 async function forceGenerateSummaries() {
-  if (!state.settings.geminiKey) {
-    showToast('⚠ Clé API Gemini requise dans Paramètres', 'warning');
+  if (!getGeminiKey('rss')) {
+    showToast('⚠ Clé API Gemini (RSS) requise dans Paramètres', 'warning');
     return;
   }
   await generateRssSummaries(true);
@@ -4096,6 +4186,9 @@ async function syncNow(silent = false) {
       }
       if (!state.settings.geminiKey && remote.settings?.geminiKey) {
         state.settings.geminiKey = remote.settings.geminiKey;
+      }
+      if (!state.settings.geminiKeyRss && remote.settings?.geminiKeyRss) {
+        state.settings.geminiKeyRss = remote.settings.geminiKeyRss;
       }
       if (!state.settings.geminiModel && remote.settings?.geminiModel) {
         state.settings.geminiModel = remote.settings.geminiModel;
