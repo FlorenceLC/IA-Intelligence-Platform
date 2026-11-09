@@ -211,7 +211,7 @@ async function importArticle() {
           .replace(/&#039;/g, "'")
           .replace(/\s{3,}/g, ' ')
           .trim()
-          .substring(0, 4000);
+          .substring(0, 12000);
       }
     } catch(fetchErr) {
       console.warn('Fetch page failed:', fetchErr.message);
@@ -313,7 +313,7 @@ async function callGemini(systemPrompt, userPrompt, temperature = 0.3, purpose =
   const body = {
     system_instruction: { parts: [{ text: systemPrompt }] },
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    generationConfig: { temperature }
+    generationConfig: { temperature, maxOutputTokens: 8192 }
   };
 
   // Retry automatique sur 429 (rate limit) et 503 (surcharge temporaire)
@@ -354,13 +354,13 @@ async function generateSummaryWithMistral(article, purpose = 'manual') {
 
   const systemPrompt = `Tu es un spécialiste de la synthèse d'articles IA pour veille professionnelle. Ton public cible est composé de professionnels de l'IA, analystes et chercheurs en veille technologique.
 
-TON ET STYLE : professionnel, neutre, concis. Aucun jugement subjectif. Priorise les faits concrets : dates, chiffres, noms propres, organisations.
+TON ET STYLE : professionnel, neutre, détaillé et riche en contenu. Aucun jugement subjectif. Ne cherche PAS à raccourcir ni à sur-synthétiser : conserve un maximum d'informations de l'article source. Priorise les faits concrets : dates, chiffres, noms propres, organisations, produits, lieux, montants, citations clés, contexte, causes, conséquences et perspectives.
 
 RÉPONDS UNIQUEMENT avec un objet JSON valide, sans markdown, sans backticks, sans texte avant ou après.
 Structure JSON obligatoire :
 {
   "titleFr": "titre traduit ou reformulé en français — clair et factuel",
-  "summary": "résumé factuel en 1 à 2 phrases maximum, en français",
+  "summary": "résumé détaillé et complet en français, rédigé en un ou deux paragraphes (6 à 10 phrases, environ 150 à 250 mots) : contexte, annonce ou événement principal, acteurs impliqués, chiffres et dates, enjeux techniques, conséquences et portée",
   "keyPoints": [
     "🏛️ Emoji pertinent + libellé court + détail factuel (chiffre, nom, fait concret)",
     "..."
@@ -370,11 +370,12 @@ Structure JSON obligatoire :
 }
 
 RÈGLES STRICTES sur keyPoints :
-- Entre 5 et 10 bullet points, jamais moins de 5, jamais plus de 10
+- Entre 8 et 12 bullet points, jamais moins de 8, jamais plus de 12 (si l'article est très court, ne pas inventer : donner tous les faits disponibles)
 - Chaque point commence par un emoji PERTINENT par rapport au contenu du point (pas toujours le même)
-- Chaque point = emoji + libellé court + détail factuel (un chiffre, un nom, une date, un fait vérifiable)
+- Chaque point = emoji + libellé court + détail factuel développé en 1 à 3 phrases (chiffres, noms, dates, faits vérifiables, éléments de contexte)
 - Le texte du point n'est PAS en gras
-- Pas de redite entre le résumé et les points clés : les points approfondissent
+- Les points clés approfondissent le résumé avec des détails supplémentaires, sans aucune information inventée
+- Ne jamais omettre un fait important de l'article source pour gagner de la place
 
 RÈGLE STRICTE sur publicationDate : ne jamais deviner ni inventer une date. Cherche uniquement une date explicitement présente dans le texte (balises meta article:published_time, datePublished, pubdate, <time datetime>, ou date écrite en clair). Si absente : null.
 
@@ -394,7 +395,7 @@ RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la
   } catch(e) {
     parsed = {
       titleFr: article.title || 'Article sans titre',
-      summary: text.substring(0, 300) || 'Résumé non disponible',
+      summary: text.substring(0, 1500) || 'Résumé non disponible',
       keyPoints: ['👩🏻‍🚀 Résumé généré depuis l\'URL'],
       domain: article.domain || 'AI technologie',
       publicationDate: null
@@ -418,7 +419,7 @@ RÈGLE STRICTE sur domain : choisir le domaine le plus précis possible parmi la
 // ── Appel Gemini dédié, focalisé uniquement sur l'extraction du tableau IA militaire ──
 async function extractDefenseTable(article, purpose = 'manual') {
   const content = article.content
-    ? article.content.substring(0, 4000)
+    ? article.content.substring(0, 12000)
     : `Titre : ${article.title}\nURL : ${article.url}`;
 
   const userPrompt = `Titre : ${article.title}\n\nContenu :\n${content}`;
@@ -434,7 +435,7 @@ Tâche :
 2. Si oui, extrais TOUTES les informations suivantes pour CHAQUE produit/système/technologie IA mentionné (une entrée par produit) :
    - fabricant : nom du fabricant ou de l'organisation
    - produit : nom du produit ou de la technologie
-   - fonctionIA : la fonction de l'IA décrite en UNE phrase précise
+   - fonctionIA : la fonction de l'IA décrite de façon précise et détaillée en 2 à 3 phrases (capacités, usage opérationnel, technologies mises en œuvre)
    - anneeSortie : année à partir de laquelle le produit sera/est livré, SI mentionnée explicitement dans le texte. Ce n'est PAS forcément l'année de publication de l'article. Si non mentionnée : "non précisé"
    - statut : un seul parmi "Existant" (commercialisé ou déjà utilisé), "En cours de développement" (annoncé ou en phase de test), "Concept" (idée, prototype ou vision non confirmée comme en développement)
    - categorie : un seul parmi "C4I" (système intégré de commandement/contrôle/communication/renseignement en temps réel), "Fonctions" (l'IA ajoute une fonctionnalité à un système sans en être le cœur — amélioration, assistance, automatisation partielle), "Système d'armes" (plateforme ou système militaire utilisant l'IA pour des fonctions opérationnelles, de ciblage, de décision ou d'autonomie)
@@ -476,7 +477,7 @@ function buildSummaryPrompt(article) {
     prompt += `Titre détecté : ${article.title}\n\n`;
   }
   if (article.content && article.content.length > 50) {
-    prompt += `Contenu extrait de la page :\n${article.content.substring(0, 3500)}\n`;
+    prompt += `Contenu extrait de la page :\n${article.content.substring(0, 12000)}\n`;
   } else {
     prompt += `(Aucun contenu extrait — base-toi sur l'URL et le titre pour inférer le sujet.)\n`;
   }
@@ -721,12 +722,12 @@ function showDuplicateModal(newArticle, existingArticle, score) {
   document.getElementById('current-article-preview').innerHTML = `
     <strong>${escHtml(newArticle.titleFr || newArticle.title)}</strong><br>
     <small style="color:${newArticle.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${publicationDateLabel(newArticle)}</small><br><br>
-    ${escHtml((newArticle.summary || '').substring(0, 200))}
+    ${escHtml((newArticle.summary || '').substring(0, 600))}
   `;
   document.getElementById('suspect-article-preview').innerHTML = `
     <strong>${escHtml(existingArticle.titleFr || existingArticle.title)}</strong><br>
     <small style="color:${existingArticle.publicationDate ? 'var(--text-muted)' : 'var(--warning)'}">${publicationDateLabel(existingArticle)}</small><br><br>
-    ${escHtml((existingArticle.summary || '').substring(0, 200))}
+    ${escHtml((existingArticle.summary || '').substring(0, 600))}
   `;
   document.getElementById('similarity-score').textContent = score + '%';
   document.getElementById('duplicate-modal').classList.remove('hidden');
@@ -752,12 +753,12 @@ function mergeDuplicateArticles() {
   const { new: newA, existing } = state.currentDuplicateCheck;
   // Fusionne points clés (dédupliqués) et résumé
   const combinedPoints = [...(existing.keyPoints || []), ...(newA.keyPoints || [])];
-  const uniquePoints = [...new Set(combinedPoints)].slice(0, 10);
+  const uniquePoints = [...new Set(combinedPoints)].slice(0, 12);
 
   const merged = {
     ...existing,
     keyPoints: uniquePoints,
-    summary: existing.summary || newA.summary || '',
+    summary: ((newA.summary || '').length > (existing.summary || '').length ? newA.summary : existing.summary) || '',
     // Conserver la date de publication la plus fiable (non vide en priorité)
     publicationDate: existing.publicationDate || newA.publicationDate || null,
     status: 'VALIDATED',
@@ -1210,11 +1211,11 @@ La similarité doit être évaluée principalement à partir du contenu des arti
 2. Fusion des articles similaires
 Lorsqu'un doublon est identifié, utilise comme base l'article déjà présent dans la veille et compare ses Informations principales avec celles du nouvel article.
 Cas 1 — Contenu identique : si les informations du nouvel article sont déjà entièrement présentes, ne crée pas de nouvel article, ne modifie pas les informations principales, conserve toutefois le lien du nouvel article.
-Cas 2 — Informations complémentaires : si le nouvel article contient des informations factuelles nouvelles, fusionne-les dans l'article existant, ajoute uniquement les nouveaux éléments factuels, ne répète jamais une information déjà présente, respecte la limite maximale de 7 bullet points.
+Cas 2 — Informations complémentaires : si le nouvel article contient des informations factuelles nouvelles, fusionne-les dans l'article existant, ajoute uniquement les nouveaux éléments factuels, ne répète jamais une information déjà présente, respecte la limite maximale de 12 bullet points.
 
 3. Gestion des bullet points
-Les "Informations principales" doivent contenir entre 3 et 7 bullet points maximum.
-Lors d'une fusion : ne conserve pas deux bullet points exprimant le même fait ; fusionne les informations similaires ; ajoute uniquement les informations réellement nouvelles ; ne crée jamais un 8e bullet point.
+Les "Informations principales" doivent contenir entre 8 et 12 bullet points maximum, chacun détaillé en 1 à 3 phrases.
+Lors d'une fusion : ne conserve pas deux bullet points exprimant le même fait ; fusionne les informations similaires ; ajoute uniquement les informations réellement nouvelles ; ne crée jamais un 13e bullet point.
 
 4. Priorité des informations
 Conserve en priorité : les faits précis ; les chiffres ; les noms d'entreprises, personnes, modèles ou technologies ; les dates et échéances ; les informations techniques ; les informations permettant de comprendre les conséquences ou la portée de l'annonce.
@@ -1229,7 +1230,7 @@ Format de réponse :
 {
   "isDuplicate": true | false,
   "mergedKeyPoints": ["point 1", "point 2", ...],
-  "mergedSummary": "résumé consolidé en 1-2 phrases"
+  "mergedSummary": "résumé consolidé détaillé et complet (6 à 10 phrases, 150 à 250 mots), qui conserve tous les faits des deux articles"
 }
 Si isDuplicate est false, mergedKeyPoints et mergedSummary peuvent être null.`;
 
@@ -1313,7 +1314,7 @@ Ces deux articles sont-ils des doublons ? Si oui, fournis les keyPoints et le r�
 
         // KeyPoints fusionnés par l'IA (max 7)
         if (Array.isArray(result.mergedKeyPoints) && result.mergedKeyPoints.length > 0) {
-          base.keyPoints = result.mergedKeyPoints.slice(0, 7);
+          base.keyPoints = result.mergedKeyPoints.slice(0, 12);
         }
 
         // Résumé fusionné
@@ -1911,7 +1912,7 @@ async function callChatAPI(question, context) {
   }
 
   try {
-    const systemPrompt = `Tu es un assistant expert en veille stratégique IA. Tu réponds en français, de façon concise et structurée, en te basant uniquement sur les articles fournis en contexte. Si la réponse n'est pas dans les articles, dis-le clairement. Utilise des listes à puces pour la clarté.`;
+    const systemPrompt = `Tu es un assistant expert en veille stratégique IA. Tu réponds en français, de façon détaillée, complète et structurée (développe chaque point avec les faits, chiffres, dates et noms présents dans les articles), en te basant uniquement sur les articles fournis en contexte. Si la réponse n'est pas dans les articles, dis-le clairement. Utilise des listes à puces pour la clarté.`;
     const userPrompt = `Contexte :\n${context}\n\nQuestion : ${question}`;
     return await callGemini(systemPrompt, userPrompt, 0.4);
   } catch(e) {
@@ -2209,7 +2210,7 @@ function parseConfluenceSummaryFromHtml(html, fallbackText) {
       const urlMatch = line.match(/https?:\/\/[^\s\)\]\}'"<>]+/);
       const url = urlMatch ? urlMatch[0] : '';
       const title = line.replace(/https?:\/\/[^\s\)\]\}'"<>]+/g, '')
-        .replace(/^[-•*·§\s]+/, '').replace(/[\[\]\(\)]/g, '').trim();
+        .replace(/[\uF000-\uF8FF]/g, '').replace(/^[-•*·§▪■□●○◦\s]+/, '').replace(/[\[\]\(\)]/g, '').trim();
       if (title.length > 3) links.push({ title, url });
     }
   }
@@ -2430,7 +2431,7 @@ function parseConfluenceSommaireStructured(text, weekLabel, html, baseUrl, extra
   function addItem(items, title, url) {
     if (skipSection) return;
     if (!currentDomain && !isFavorite) return;
-    title = (title || '').replace(/^[-•*·§✦▸▶➤➢»›\s]+/, '').replace(/\s+/g, ' ').trim();
+    title = (title || '').replace(/[\uF000-\uF8FF]/g, '').replace(/^[-•*·§▪■□●○◦✦▸▶➤➢»›\s]+/, '').replace(/\s+/g, ' ').trim();
     if (title.length < 3) return;
     items.push({ title, url: url || '', domain: isFavorite ? null : currentDomain, isFavorite });
   }
@@ -2575,7 +2576,7 @@ function generateMailFromSommaires() {
     const linkHtml = s.confluenceUrl
       ? `<a href="${escHtml(s.confluenceUrl)}" style="color:#1155CC">${escHtml(s.confluenceTitle)}</a>`
       : `<strong>${escHtml(s.confluenceTitle)}</strong>`;
-    body += `<p style="margin:0 0 4px">Vous trouverez la veille IA de la semaine … ici ${linkHtml}</p>`;
+    body += `<p style="margin:0 0 4px">Vous trouverez ici la ${linkHtml}</p>`;
   }
 
   body += `<p style="margin:14px 0 4px">&nbsp;</p>`;
@@ -2586,62 +2587,53 @@ function generateMailFromSommaires() {
   body += `<p style="margin:0 0 4px">⚠️<em>Le contenu de cette veille est en partie généré par IA.</em></p>`;
   body += `<p style="margin:14px 0 4px">&nbsp;</p>`;
 
-  // ── § Veille Interne ──
-  body += `<p style="margin:0 0 4px"><strong>§&nbsp;&nbsp;🏭Veille Interne :</strong></p>`;
-  body += `<ul style="margin:4px 0 14px;padding-left:28px">`;
-  body += `<li style="margin-bottom:3px">🔒Blocage des sites permettant d'accéder aux GPT et les .ai en général.</li>`;
+  // ── Système de puces : vraies listes HTML (<ul>/<li>) — compatibles Outlook, aucun caractère « § » (Wingdings) ──
+  //    niveau 1 = carré ▪ (remplace l'ancien « § »), niveau 2 = rond creux ◦, niveau 3 = rond plein •
+  const UL1 = 'margin:0 0 14px;padding-left:28px;list-style-type:square';
+  const UL2 = 'margin:4px 0 8px;padding-left:28px;list-style-type:circle';
+  const UL3 = 'margin:2px 0 8px;padding-left:28px;list-style-type:disc';
+  const itemLi = item =>
+    `<li style="margin-bottom:3px">` +
+    (item.url ? `<a href="${escHtml(item.url)}" style="color:#1155CC">${escHtml(item.title)}</a>` : escHtml(item.title)) +
+    `</li>`;
+  const emptyLi = `<li style="margin-bottom:3px;color:#6b7280">—</li>`;
+
+  body += `<ul style="${UL1}">`;
+
+  // ── Veille Interne ──
+  body += `<li style="margin-bottom:10px"><strong>🏭 Veille Interne :</strong>`;
+  body += `<ul style="${UL2}">`;
+  body += `<li style="margin-bottom:3px">🔒 Blocage des sites permettant d'accéder aux GPT et les .ai en général.</li>`;
   body += `<li style="margin-bottom:3px">Une solution d'IA générative chez KNDS&nbsp;?</li>`;
   body += `<li style="margin-bottom:3px">Législation européenne et enjeux juridiques de l'IA</li>`;
   body += `<li style="margin-bottom:3px">Nouvelle formation sur la sensibilisation IA disponible à tous</li>`;
   body += `<li style="margin-bottom:3px">Concurrence et IA</li>`;
-  body += `</ul>`;
+  body += `</ul></li>`;
 
-  // ── § Articles à la une ──
-  body += `<p style="margin:0 0 4px"><strong>§&nbsp;&nbsp;🏆 Article(s) à la une :</strong></p>`;
+  // ── Articles à la une ──
+  body += `<li style="margin-bottom:10px"><strong>🏆 Article(s) à la une :</strong>`;
   for (const s of parsed) {
     const featured = s.items.filter(i => i.isFavorite);
-    body += `<p style="margin:8px 0 2px"><strong>${escHtml(s.weekLabel)}</strong></p>`;
-    if (featured.length > 0) {
-      body += `<ul style="margin:2px 0 4px;padding-left:28px">`;
-      for (const item of featured) {
-        body += `<li style="margin-bottom:3px">`;
-        if (item.url) body += `<a href="${escHtml(item.url)}" style="color:#1155CC">${escHtml(item.title)}</a>`;
-        else body += escHtml(item.title);
-        body += `</li>`;
-      }
-      body += `</ul>`;
-    } else {
-      body += `<ul style="margin:2px 0 4px;padding-left:28px"><li style="color:#6b7280">—</li></ul>`;
-    }
+    body += `<div style="margin:6px 0 0 4px"><strong>${escHtml(s.weekLabel)}</strong></div>`;
+    body += `<ul style="${UL2}">${featured.length > 0 ? featured.map(itemLi).join('') : emptyLi}</ul>`;
   }
-  body += `<p style="margin:14px 0">&nbsp;</p>`;
+  body += `</li>`;
 
-  // ── § Veille Externe ──
-  body += `<p style="margin:0 0 8px"><strong>§&nbsp;&nbsp;🛸Veille Externe :</strong></p>`;
-
+  // ── Veille Externe ──
+  body += `<li style="margin-bottom:10px"><strong>🛸 Veille Externe :</strong>`;
+  body += `<ul style="${UL2}">`;
   for (const domDef of MAIL_DOMAIN_ORDER) {
-    body += `<ul style="margin:0 0 4px;padding-left:20px;list-style:none">`;
-    body += `<li><strong>${domDef.emoji}&nbsp;${domDef.label}</strong></li>`;
-    body += `</ul>`;
-
+    body += `<li style="margin-bottom:8px"><strong>${domDef.emoji}&nbsp;${domDef.label}</strong>`;
     for (const s of parsed) {
       const domItems = s.items.filter(i => i.domain === domDef.key);
-      body += `<p style="margin:6px 0 2px;padding-left:20px"><strong>${escHtml(s.weekLabel)}</strong></p>`;
-      if (domItems.length > 0) {
-        body += `<ul style="margin:2px 0 10px;padding-left:44px">`;
-        for (const item of domItems) {
-          body += `<li style="margin-bottom:3px">`;
-          if (item.url) body += `<a href="${escHtml(item.url)}" style="color:#1155CC">${escHtml(item.title)}</a>`;
-          else body += escHtml(item.title);
-          body += `</li>`;
-        }
-        body += `</ul>`;
-      } else {
-        body += `<ul style="margin:2px 0 10px;padding-left:44px"><li style="color:#6b7280">—</li></ul>`;
-      }
+      body += `<div style="margin:4px 0 0 4px"><strong>${escHtml(s.weekLabel)}</strong></div>`;
+      body += `<ul style="${UL3}">${domItems.length > 0 ? domItems.map(itemLi).join('') : emptyLi}</ul>`;
     }
-    body += `<p style="margin:10px 0">&nbsp;</p>`;
+    body += `</li>`;
   }
+  body += `</ul></li>`;
+
+  body += `</ul>`;
 
   // ── Signature Task Force ──
   body += `<p style="margin:20px 0 4px">&nbsp;</p>`;
@@ -2654,74 +2646,68 @@ function generateMailFromSommaires() {
 
   body += `</div>`;
 
-  // ── Générer le fichier .eml ──
+  // ── Objet du mail ──
   const customSubject = document.getElementById('mail-newsletter-title')?.value?.trim();
   if (!customSubject || /\bMOIS\b/.test(customSubject)) {
     showToast('⚠ Remplacez MOIS dans le titre du mail (ex : Communauté IA - Veille IA Octobre)', 'warning');
     return;
   }
-  const subject = customSubject;
-  const eml = buildEml(subject, body);
-  downloadEml(eml, `Veille_IA_${sorted[0].weekLabel.replace(/\s+/g, '_')}.eml`);
 
   // ── Prévisualisation dans l'app ──
   showExportPreviewHtml(body);
-  showToast('✅ Mail généré — Outlook devrait s\'ouvrir automatiquement. Si non, autorisez les popups pour ce site.', 'success');
+
+  // ── Copie du mail formaté + ouverture d'un nouveau message Outlook (objet pré-rempli) ──
+  openMailDraft(customSubject, body);
 }
 
-function buildEml(subject, htmlBody) {
-  const boundary = 'boundary_' + Math.random().toString(36).slice(2);
-  const date = new Date().toUTCString();
-  const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body>${htmlBody}</body></html>`;
+// Plus de fichier .eml : le mail formaté est copié dans le presse-papiers et un nouveau message
+// s'ouvre dans le client mail par défaut (Outlook) avec l'objet déjà renseigné.
+// Il reste à coller (Ctrl+V) dans le corps du message et à saisir le(s) destinataire(s).
+// (Un lien mailto: ne peut transporter que du texte brut, d'où le collage du contenu formaté.)
+function openMailDraft(subject, htmlBody) {
+  const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${htmlBody}</body></html>`;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = htmlBody;
+  const plain = tmp.innerText || tmp.textContent || '';
 
-  // Texte brut minimal (fallback)
-  const plain = `Veille IA — Ouvrez ce mail en HTML pour voir le contenu complet.`;
-
-  return [
-    `MIME-Version: 1.0`,
-    `Date: ${date}`,
-    `Subject: =?UTF-8?B?${btoa(unescape(encodeURIComponent(subject)))}?=`,
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    ``,
-    `--${boundary}`,
-    `Content-Type: text/plain; charset=utf-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
-    ``,
-    plain,
-    ``,
-    `--${boundary}`,
-    `Content-Type: text/html; charset=utf-8`,
-    `Content-Transfer-Encoding: base64`,
-    ``,
-    // Base64 encode par chunks de 76 chars (RFC 2045)
-    btoa(unescape(encodeURIComponent(fullHtml))).replace(/(.{76})/g, '$1\r\n'),
-    ``,
-    `--${boundary}--`,
-  ].join('\r\n');
-}
-
-function downloadEml(content, filename) {
-  // Tente d'ouvrir directement dans Outlook via window.open (type message/rfc822)
-  // Si le navigateur bloque, bascule sur le téléchargement classique
-  const blob = new Blob([content], { type: 'message/rfc822' });
-  const url  = URL.createObjectURL(blob);
-
-  // window.open avec ce MIME type ouvre Outlook sur la plupart des configs Windows
-  const win = window.open(url, '_blank');
-
-  // Fallback : si le popup est bloqué ou si le navigateur ne gère pas ce MIME,
-  // on télécharge le fichier comme avant
-  if (!win || win.closed || typeof win.closed === 'undefined') {
+  const openCompose = () => {
     const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
+    a.href = 'mailto:?subject=' + encodeURIComponent(subject);
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 3000);
+    setTimeout(() => a.remove(), 1000);
+  };
+  const done = () => {
+    showToast('✅ Mail copié — dans la fenêtre Outlook qui s\'ouvre, cliquez dans le message et faites Ctrl+V, puis ajoutez le destinataire', 'success');
+    openCompose();
+  };
+  const fallback = () => {
+    try {
+      const el = document.createElement('div');
+      el.innerHTML = htmlBody;
+      el.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(el);
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const ok = document.execCommand('copy');
+      sel.removeAllRanges();
+      document.body.removeChild(el);
+      if (ok) { done(); return; }
+    } catch (e) { /* on tombe sur l'avertissement */ }
+    showToast('⚠ Copie automatique impossible — utilisez le bouton « Copier (formaté) » de la prévisualisation puis collez dans Outlook', 'warning');
+    openCompose();
+  };
+
+  if (navigator.clipboard && window.ClipboardItem) {
+    navigator.clipboard.write([new ClipboardItem({
+      'text/html':  new Blob([fullHtml], { type: 'text/html' }),
+      'text/plain': new Blob([plain],    { type: 'text/plain' })
+    })]).then(done).catch(fallback);
   } else {
-    // L'onglet s'est ouvert → Outlook devrait le prendre en charge
-    // On révoque l'URL après un délai pour laisser le temps au handler de se déclencher
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    fallback();
   }
 }
 
@@ -2795,7 +2781,7 @@ function formatArticleNewsletterMerged(articles) {
   // Combine all unique key points
   const allPoints = [];
   articles.forEach(a => (a.keyPoints || []).forEach(p => { if (!allPoints.includes(p)) allPoints.push(p); }));
-  const points = allPoints.slice(0, 10).map(p => `• ${p}`).join('\n');
+  const points = allPoints.slice(0, 12).map(p => `• ${p}`).join('\n');
 
   let block = '';
   block += `${main.titleFr || main.title}\n`;
@@ -3197,7 +3183,7 @@ Si aucun lien ne traite d'IA, réponds : { "ai_urls": [] }`;
             .replace(/<script[\s\S]*?<\/script>/gi, ' ')
             .replace(/<style[\s\S]*?<\/style>/gi, ' ')
             .replace(/<[^>]+>/g, ' ')
-            .replace(/\s{3,}/g, ' ').trim().substring(0, 4000);
+            .replace(/\s{3,}/g, ' ').trim().substring(0, 12000);
         }
       } catch(e) {}
 
@@ -3901,7 +3887,7 @@ function stripHtml(html = '') {
     .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
     .replace(/\s{2,}/g, ' ')
     .trim()
-    .substring(0, 600);
+    .substring(0, 2000);
 }
 
 async function generateRssSummaries(showProgress = false) {
